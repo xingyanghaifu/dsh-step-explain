@@ -1,0 +1,13 @@
+# Adds the step explainer to the chat. The Client half registers five read-only
+# render cells and never answers an approval; the Host half serves the optional
+# model routes. To switch it off later, add `disabled: true` to this entry.
+#
+# The optional `config` below is a default for everyone on this machine; the
+# Settings row saves a per-machine choice that wins over it. Leave both out to
+# follow whatever model the chat uses.
+- insert:
+    - id: step-explain
+      name: dsh-step-explain
+      # config:
+      #   provider: deepseek
+      #   model: deepseek-chat

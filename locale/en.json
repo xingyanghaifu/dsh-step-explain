@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Step Explain",
+    "description": "Explains every step the model takes in plain language: what it does, what it affects, whether it can be undone, and what Allow or Reject means in the approval dialog."
+  }
+}
