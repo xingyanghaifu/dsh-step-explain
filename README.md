@@ -53,7 +53,20 @@ The top right has **three length levels** side by side: **Short / Medium / Full*
 
 **It never sends for you**: unless you click **Use it**, nothing in the composer changes, and sending is always your Enter. The composer stays usable while a rewrite runs.
 
-> A request is sent only when you click **Rewrite**. What it carries is the text in your composer (plus any change you asked for). No click, no request.
+### Reading the conversation (off by default)
+
+A rewrite can read the current conversation, so a sentence like "fix that bug" is rewritten into something specific instead of staying vague about what "that" means. The bar shows a **Read chat: on/off** button, and the same switch sits in **Settings → Step Explain**.
+
+| State | What a rewrite sends |
+| --- | --- |
+| **Off** (default) | Only the sentence in your composer, plus any change you asked for. Nothing about the conversation leaves this machine. |
+| **On** | The same, plus the last few messages between you and the assistant, up to 4000 characters. |
+
+What is read, when it is on: your own visible messages and the assistant's visible replies, newest first until the cap. Tool arguments, tool results, reasoning and anything hidden are never included — a rewrite needs to know what you meant, not what the tools were doing. The transcript is labelled as background in the request, so the model treats it as context for the sentence and not as a second instruction to rewrite.
+
+The switch is read at send time, so flipping it applies to the very next rewrite with no reload. Its state is remembered per browser.
+
+> A request is sent only when you click **Rewrite**. What it carries is the text in your composer (plus any change you asked for, plus the conversation when the switch is on). No click, no request.
 
 > The third surface only **explains**: it renders no Allow / Reject control, never intercepts Enter or Escape, and never decides for you.
 > All it adds is one level button in the top right (see below), and that button submits no answer.

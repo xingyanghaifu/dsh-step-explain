@@ -138,6 +138,61 @@ window.__ModuleLoader__.load({
       return steps
     }
 
+    /**
+     * The recent conversation, as plain text for a rewrite to read.
+     *
+     * Only what the reader already sees in the chat is collected: their own
+     * messages and the model's visible replies. Tool arguments, tool results,
+     * reasoning and anything hidden are left out — a rewrite needs to know what
+     * "那个 bug" refers to, not what the tools were doing. The tail is kept
+     * because the newest exchanges are the ones that carry the referent.
+     * @param nodes - `legacy.nodes` from the chat snapshot, oldest first.
+     * @param maxChars - hard cap on the returned text.
+     * @returns one labelled transcript block per message, oldest first.
+     */
+    function transcriptOf(nodes, maxChars) {
+      const lines = []
+      for (const node of nodes) {
+        if (node.visibility === 'hidden') continue
+        if (node.kind === 'user') {
+          const text = flattenText(node.data?.content)
+          if (text !== '') lines.push(`${'用户'}\n${text}`)
+          continue
+        }
+        if (node.kind === 'assistant-step') {
+          const text = flattenText(node.data?.content)
+          if (text !== '') lines.push(`${'助手'}\n${text}`)
+        }
+      }
+      // Newest last, so trimming from the front drops the oldest exchanges.
+      let kept = []
+      let total = 0
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = lines[index]
+        if (total + line.length > maxChars) break
+        kept.unshift(line)
+        total += line.length + 2
+      }
+      return kept.join('\n\n')
+    }
+
+    /**
+     * Flatten one message's content into text, ignoring images and anything that
+     * is not a text part. A shape this plugin does not understand yields ''.
+     */
+    function flattenText(content) {
+      if (typeof content === 'string') return content.trim()
+      if (!Array.isArray(content)) return ''
+      const parts = []
+      for (const part of content) {
+        if (typeof part === 'string') parts.push(part)
+        else if (part !== null && typeof part === 'object' && typeof part.text === 'string' && part.type !== 'tool-result') {
+          parts.push(part.text)
+        }
+      }
+      return parts.join(' ').replace(/\s+/g, ' ').trim()
+    }
+
     /** The shell command of a call, uncapped: the approval dialog must never clip it. */
     function commandOf(root) {
       try {
@@ -159,6 +214,13 @@ window.__ModuleLoader__.load({
      */
     const STUDY_KEY = 'dsh-step-explain/study'
     const STUDY_LEVELS = ['now', 'why', 'plan']
+    /**
+     * Whether a rewrite may read the current conversation. Off by default: it
+     * sends chat text off this machine, so it is opt-in like the model levels.
+     */
+    const CONTEXT_KEY = 'dsh-step-explain/context'
+    /** How much of the conversation one rewrite may carry; mirrors the Host cap. */
+    const MAX_CONTEXT_CHARS = 4000
     /** Host route that turns one call into one short paragraph. */
     const DETAIL_ROUTE = 'api/step-explain.detail'
     /** Host route that rewrites one rough instruction. */
@@ -443,7 +505,7 @@ window.__ModuleLoader__.load({
      * context for the model, never instructions to the Host: nothing here is
      * executed, and the answer only ever lands in the draft.
      */
-    async function fetchRewrite({ text, tone, lang, previous, instruction }, signal) {
+    async function fetchRewrite({ text, tone, lang, previous, instruction, context }, signal) {
       try {
         const response = await fetch(REWRITE_ROUTE, {
           method: 'POST',
@@ -454,6 +516,9 @@ window.__ModuleLoader__.load({
             lang,
             ...(previous === undefined || previous === '' ? {} : { previous }),
             ...(instruction === undefined || instruction === '' ? {} : { instruction }),
+            // Absent entirely when the switch is off, so the Host never has to
+            // distinguish "empty context" from "context not offered".
+            ...(context === undefined || context === '' ? {} : { context }),
           }),
           signal,
         })
@@ -516,6 +581,43 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         explainListeners.add(setOn)
         return () => explainListeners.delete(setOn)
+      }, [])
+      return on
+    }
+
+    /**
+     * Whether a rewrite may read the conversation. Off by default, so the first
+     * rewrite sends only what the reader typed.
+     */
+    let contextOn = readContext()
+    const contextListeners = new Set()
+
+    /** Read the stored switch; a blocked read keeps the private default (off). */
+    function readContext() {
+      try {
+        return globalThis.localStorage?.getItem(CONTEXT_KEY) === 'on'
+      } catch {
+        return false
+      }
+    }
+
+    /** Store the switch; a blocked write only loses it for this page. */
+    function setContext(next) {
+      contextOn = next === true
+      try {
+        globalThis.localStorage?.setItem(CONTEXT_KEY, contextOn ? 'on' : 'off')
+      } catch {
+        // Private mode or a full quota: the switch lasts for this page.
+      }
+      for (const notify of contextListeners) notify(contextOn)
+    }
+
+    /** The switch, read by the rewrite bar so a flip applies to the next run. */
+    function useContextSwitch() {
+      const [on, setOn] = React.useState(contextOn)
+      React.useEffect(() => {
+        contextListeners.add(setOn)
+        return () => contextListeners.delete(setOn)
       }, [])
       return on
     }
@@ -607,8 +709,11 @@ window.__ModuleLoader__.load({
      */
     const TONES = ['concise', 'balanced', 'detailed']
 
-    function RewriteBar({ useInput, inputActions, t }) {
+    function RewriteBar({ useInput, useChat, inputActions, t }) {
       const draft = useInput((input) => input.draft)
+      const withContext = useContextSwitch()
+      // Read live, not snapshotted at mount: a flip applies to the next run.
+      const nodes = useChat((snapshot) => snapshot.legacy.nodes)
       const [tone, setTone] = React.useState('detailed')
       const [busy, setBusy] = React.useState(false)
       const [offer, setOffer] = React.useState('')
@@ -630,8 +735,11 @@ window.__ModuleLoader__.load({
         abort.current = controller
         setBusy(true)
         setNote('')
+        // The switch is read here, at send time, so turning it off takes effect
+        // on the very next run rather than after a reload.
+        const context = withContext ? transcriptOf(nodes, MAX_CONTEXT_CHARS) : ''
         void fetchRewrite(
-          { text: source, tone, lang: langNow(), previous: instruction === undefined ? '' : result, instruction },
+          { text: source, tone, lang: langNow(), previous: instruction === undefined ? '' : result, instruction, context },
           controller.signal,
         ).then((next) => {
           if (controller.signal.aborted) return
@@ -686,12 +794,29 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 className: 'dse-toggle',
+                // The label names what it does to the next run, so the reader
+                // can tell the state without hovering.
+                'aria-pressed': withContext,
+                'aria-label': t('rewrite.contextAria', { state: t(withContext ? 'rewrite.contextOn' : 'rewrite.contextOff') }),
+                disabled: busy,
+                onClick: () => setContext(!withContext),
+              },
+              t(withContext ? 'rewrite.contextOn' : 'rewrite.contextOff'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dse-toggle',
                 disabled: busy || draft.trim() === '',
                 onClick: () => run(draft),
               },
               busy ? t('rewrite.busy') : result === '' ? t('rewrite.go') : t('rewrite.again'),
             ),
           ),
+          // Says plainly what the switch does to the next run, since it sends
+          // chat text off this machine.
+          h('div', { className: 'dse-foot' }, t(withContext ? 'rewrite.contextHintOn' : 'rewrite.contextHintOff')),
           note !== '' && h('div', { className: 'dse-warn' }, note),
           result !== '' &&
             h(
@@ -1002,6 +1127,7 @@ window.__ModuleLoader__.load({
       const level = useDetailLevel()
       const study = useStudyLevel()
       const byModel = useExplainByModel()
+      const context = useContextSwitch()
       const picker = useModelPicker()
       /** One labelled control in the page's row rhythm. */
       const row = (title, body, control, extra) =>
@@ -1102,6 +1228,32 @@ window.__ModuleLoader__.load({
         // The cost line is its own paragraph, so it is read before the switch is
         // flipped rather than after.
         h('p', { className: 'dse-page-cost' }, t('page.modelExplain.cost')),
+
+        row(
+          t('page.context.title'),
+          t('page.context.body'),
+          h(
+            'div',
+            { className: 'dse-levels', role: 'group', 'aria-label': t('page.context.title') },
+            [
+              ['off', false],
+              ['on', true],
+            ].map(([key, value]) =>
+              h(
+                'button',
+                {
+                  key,
+                  type: 'button',
+                  className: context === value ? 'dse-btn dse-btn-on' : 'dse-btn',
+                  'aria-pressed': context === value,
+                  onClick: () => setContext(value),
+                },
+                t(`page.modelExplain.${key}`),
+              ),
+            ),
+          ),
+          'dse-setting-levels',
+        ),
 
         h('div', { className: 'dse-page-section' }, t('page.section.about')),
         h(
@@ -1340,6 +1492,8 @@ window.__ModuleLoader__.load({
       'page.modelExplain.off': '关闭',
       'page.modelExplain.cost': '⚠ 会增加 token 消耗：开启后，每个工具调用都会单独发一次请求（工具名 + 参数原文 + 一句回答，上限 200 token），一轮里有 10 步就是 10 次。这些消耗计入你当前的模型额度，和聊天本身分开计算。看不清收益时建议先关着，只在审批框里用「模型补充」档。',
       'page.section.about': '关于',
+      'page.context.title': '扩写时读取当前对话',
+      'page.context.body': '开启后，输入框上方的扩写会读取这段对话里你和助手的最近几条消息，用来理解你指的是什么。关闭时只发送你输入框里的那句话。开关在扩写面板上也有一份，两处同步。',
       'page.about.privacy': '只有「模型补充」档会把工具名和参数原文发出去；基础档和完整说明档完全在本机生成。',
       'page.about.boundary': '这个插件只做解释：它不渲染允许/拒绝按钮，不拦截 Enter / Esc，也不会替你回答审批。',
       'settings.title': '步骤说明的详细版由哪个模型写',
@@ -1352,6 +1506,11 @@ window.__ModuleLoader__.load({
       'rewrite.again': '重新扩写',
       'rewrite.busy': '正在改写…',
       'rewrite.toneAria': '改写篇幅',
+      'rewrite.contextOn': '读取对话：开',
+      'rewrite.contextOff': '读取对话：关',
+      'rewrite.contextAria': '读取当前对话上下文，当前{state}',
+      'rewrite.contextHintOn': '扩写会读取这段对话里你和助手的最近几条消息，用来理解你指的是什么；关闭后只发送你输入框里的那句话。',
+      'rewrite.contextHintOff': '扩写只发送你输入框里的那句话，不读取对话内容。',
       'rewrite.tone.concise': '简短',
       'rewrite.tone.balanced': '适中',
       'rewrite.tone.detailed': '详细',
@@ -1501,6 +1660,8 @@ window.__ModuleLoader__.load({
       'page.modelExplain.off': 'Off',
       'page.modelExplain.cost': '⚠ This costs tokens: with it on, every tool call sends its own request (tool name + raw arguments + one short answer, capped at 200 tokens), so a ten-step turn is ten requests. That spend counts against your current model quota and is billed separately from the chat itself. Leave it off unless the extra line earns its cost, or use the Model notes level in the approval dialog instead.',
       'page.section.about': 'About',
+      'page.context.title': 'Read the current conversation when rewriting',
+      'page.context.body': 'When on, the rewrite bar above the composer reads the last few messages between you and the assistant, so it knows what you are referring to. When off, it sends only the sentence in your composer. The rewrite panel has the same switch, and the two stay in sync.',
       'page.about.privacy': 'Only the model-notes level sends the tool name and its arguments off this machine; basic and full are generated locally.',
       'page.about.boundary': 'This plugin only explains: it renders no allow or reject control, does not intercept Enter or Escape, and never answers an approval for you.',
       'settings.title': 'Model that writes the detailed step explanation',
@@ -1513,6 +1674,11 @@ window.__ModuleLoader__.load({
       'rewrite.again': 'Rewrite again',
       'rewrite.busy': 'Rewriting…',
       'rewrite.toneAria': 'Rewrite length',
+      'rewrite.contextOn': 'Read chat: on',
+      'rewrite.contextOff': 'Read chat: off',
+      'rewrite.contextAria': 'Read the current conversation as context, currently {state}',
+      'rewrite.contextHintOn': 'A rewrite reads the last few messages between you and the assistant, so it knows what you are referring to. Turn it off to send only the sentence in your composer.',
+      'rewrite.contextHintOff': 'A rewrite sends only the sentence in your composer; it does not read the conversation.',
       'rewrite.tone.concise': 'Short',
       'rewrite.tone.balanced': 'Medium',
       'rewrite.tone.detailed': 'Full',
@@ -1611,6 +1777,10 @@ window.__ModuleLoader__.load({
         STUDY_LEVELS,
         readExplain,
         setExplain,
+        readContext,
+        setContext,
+        transcriptOf,
+        flattenText,
         Detail,
         Explanation,
         clipModelLine,

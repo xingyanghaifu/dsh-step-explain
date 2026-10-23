@@ -27,6 +27,13 @@ const MAX_ARGS_CHARS = 2000
 const MAX_DETAIL_CHARS = 600
 /** A rewrite may be longer than a one-line explanation but still bounded. */
 const MAX_REWRITE_CHARS = 4000
+/**
+ * How much conversation a rewrite may carry. Bounded because it is context for
+ * one instruction, not a second copy of the session: a few recent exchanges are
+ * enough to know what "那个 bug" refers to, and the cap keeps the token cost of
+ * the optional context predictable.
+ */
+const MAX_CONTEXT_CHARS = 4000
 const MAX_ID_CHARS = 120
 const TIMEOUT_MS = 20_000
 /** Prose only: no Markdown, no restating the arguments, no advice. */
@@ -138,24 +145,29 @@ export function parseInput(body) {
 
 /**
  * Validate one rewrite request: the draft plus, optionally, how to shape it,
- * the language and the reader's model choice.
+ * the language, the reader's model choice and the conversation context the
+ * reader agreed to send.
  * @param body - decoded request body.
- * @returns text, tone, language, model and the previous draft, or undefined.
+ * @returns text, tone, language, model, previous draft and context, or undefined.
  */
 export function parseRewrite(body) {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined
-  const { text, tone, lang, model, previous, instruction } = body
+  const { text, tone, lang, model, previous, instruction, context } = body
   if (typeof text !== 'string' || text.trim() === '') return undefined
   if (tone !== undefined && (typeof tone !== 'string' || TONE[tone] === undefined)) return undefined
   if (previous !== undefined && typeof previous !== 'string') return undefined
   if (instruction !== undefined && typeof instruction !== 'string') return undefined
   if (model !== undefined && routeOf(model) === undefined) return undefined
+  // The context is a plain transcript the browser assembled; anything else is
+  // refused rather than coerced, so a caller cannot smuggle a structure in.
+  if (context !== undefined && typeof context !== 'string') return undefined
   return {
     text: text.slice(0, MAX_REWRITE_CHARS),
     tone: tone ?? 'detailed',
     lang: typeof lang === 'string' && lang.startsWith('zh') ? 'zh' : 'en',
     previous: (previous ?? '').slice(0, MAX_REWRITE_CHARS),
     instruction: (instruction ?? '').slice(0, MAX_ARGS_CHARS),
+    context: (context ?? '').slice(0, MAX_CONTEXT_CHARS),
     ...(model === undefined ? {} : { model: routeOf(model) }),
   }
 }
@@ -277,9 +289,19 @@ async function rewrite(ctx, input, route, signal) {
     signal,
   )
   const system = `${REWRITE_SYSTEM[input.lang]}\n${TONE[input.tone][input.lang]}`
+  // The conversation, when the reader turned context on. It is labelled and
+  // fenced off so the model treats it as background for what the draft means,
+  // never as a second instruction to obey — the draft is still the thing being
+  // rewritten.
+  const parts = []
+  if (input.context !== '') {
+    parts.push(
+      `[${input.lang === 'zh' ? '当前对话的最近内容（只用来理解下面这句话指的是什么，不要改写它，也不要照抄）' : 'Recent content of this conversation (only to understand what the sentence below refers to; do not rewrite it and do not copy it)'}]\n${input.context}\n`,
+    )
+  }
+  parts.push(input.text)
   // The previous rewrite is context for "make it shorter", never a second
   // instruction to obey; it is labelled so the model cannot mistake it.
-  const parts = [input.text]
   if (input.previous !== '') parts.push(`\n[${input.lang === 'zh' ? '上一版' : 'Previous version'}]\n${input.previous}`)
   if (input.instruction !== '') {
     parts.push(`\n[${input.lang === 'zh' ? '这次的修改要求' : 'This change'}] ${input.instruction}`)

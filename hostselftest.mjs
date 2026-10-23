@@ -306,6 +306,41 @@ assert.equal(rewriteSeen.maxTokens, 1200, 'a rewrite gets room for a whole instr
 assert.equal(rewriteSeen.provider, 'p')
 assert.ok(rewritePrompt?.system.includes('尽量短'), 'the concise tone reaches the prompt')
 
+// The conversation context is validated at the wire and, when present, reaches
+// the model as labelled background rather than as a second instruction.
+assert.equal(parseRewrite({ text: 'x', context: '用户: 修那个 bug' }).context, '用户: 修那个 bug', 'a context string survives parsing')
+assert.equal(parseRewrite({ text: 'x' }).context, '', 'no context means an empty one')
+assert.equal(parseRewrite({ text: 'x', context: 7 }), undefined, 'a non-string context is refused')
+assert.equal(parseRewrite({ text: 'x', context: { text: 'x' } }), undefined, 'a structured context is refused rather than coerced')
+assert.equal(parseRewrite({ text: 'x', context: 'y'.repeat(9000) }).context.length, 4000, 'the context is capped like the draft')
+{
+  let withContext
+  ctx.llm.prepareCall = async (config) => ({
+    config,
+    async *stream(request) {
+      withContext = request
+      yield { type: 'text-delta', text: 'x' }
+    },
+  })
+  await postRewrite({ text: '修那个 bug', context: '用户: 刚才那个登录页报错了', lang: 'zh' })
+  const sent = withContext.messages[0].content[0].text
+  assert.ok(sent.includes('刚才那个登录页报错了'), 'the context reaches the model')
+  assert.ok(sent.includes('不要改写它'), 'and is labelled as background, not as something to rewrite')
+  assert.ok(sent.indexOf('刚才那个登录页报错了') < sent.indexOf('修那个 bug'), 'the context comes before the draft it explains')
+
+  // Without a context the prompt is exactly the draft: no empty section.
+  let withoutContext
+  ctx.llm.prepareCall = async (config) => ({
+    config,
+    async *stream(request) {
+      withoutContext = request
+      yield { type: 'text-delta', text: 'x' }
+    },
+  })
+  await postRewrite({ text: '修那个 bug', lang: 'zh' })
+  assert.equal(withoutContext.messages[0].content[0].text, '修那个 bug', 'no context means no context section at all')
+}
+
 // The request body: the draft, then the previous version, then the change.
 let prompt
 ctx.llm.prepareCall = async (config) => ({

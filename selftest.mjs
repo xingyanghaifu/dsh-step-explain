@@ -728,16 +728,16 @@ assert.ok(!pageText.includes('详细程度：基础'), 'the button does not repe
 // Two three-level groups now: the approval dialog's detail and the study level.
 // They are separate settings, so each keeps its own set of three buttons.
 const levelButtons = controlsOf(page).filter((node) => node.type === 'button')
-assert.equal(levelButtons.length, 8, 'the page shows both three-level groups and the on/off pair')
+assert.equal(levelButtons.length, 10, 'the page shows both three-level groups and the two on/off pairs')
 assert.deepEqual(
   levelButtons.map((node) => textOf(node)),
-  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步', '关闭', '开启'],
+  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步', '关闭', '开启', '关闭', '开启'],
   'each button is labelled with its level only',
 )
 assert.deepEqual(
   levelButtons.map((node) => node.props['aria-pressed']),
-  [true, false, false, false, false, true, true, false],
-  'each group marks its own current level: Basic for the dialog, the fullest for study, off for the model switch',
+  [true, false, false, false, false, true, true, false, true, false],
+  'each group marks its own current level: Basic for the dialog, the fullest for study, both switches off',
 )
 // The level control must be reachable: the row that holds it lets the group
 // wrap and grow rather than clipping it out of the scroll column.
@@ -833,42 +833,56 @@ assert.ok(
     for (const effect of effects) effect()
     return tree
   }
-  const press = (tree, label) => {
-    const button = controlsOf(tree).find((node) => node.type === 'button' && textOf(node) === label)
-    assert.ok(button !== undefined, `the "${label}" button is rendered`)
+  // Two on/off pairs share the labels 关闭/开启, so a plain text lookup would
+  // always hit the first. `nth` picks the occurrence, and the assertions below
+  // name which pair they mean.
+  const press = (tree, label, nth = 0) => {
+    const matches = controlsOf(tree).filter((node) => node.type === 'button' && textOf(node) === label)
+    const button = matches[nth]
+    assert.ok(button !== undefined, `the "${label}" button #${nth} is rendered`)
     button.props.onClick()
   }
   const pressed = (tree) => controlsOf(tree).filter((node) => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf)
 
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'the page opens on each group’s own default')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'the page opens on each group’s own default')
   press(draw(), '完整说明')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'full', 'the click is stored')
-  assert.deepEqual(pressed(draw()), ['完整说明', '下一步', '关闭'], 'and the re-rendered page shows it as current')
+  assert.deepEqual(pressed(draw()), ['完整说明', '下一步', '关闭', '关闭'], 'and the re-rendered page shows it as current')
   press(draw(), '模型补充')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'model', 'another level is picked the same way')
-  assert.deepEqual(pressed(draw()), ['模型补充', '下一步', '关闭'], 'the page follows the new pick')
+  assert.deepEqual(pressed(draw()), ['模型补充', '下一步', '关闭', '关闭'], 'the page follows the new pick')
   // Back to basic, so the rest of the file starts where it expects to.
   press(draw(), '基础')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'and it can go back')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'and it can go back')
 
   // The study level is its own setting: it moves without touching the detail one.
   press(draw(), '为什么')
   assert.equal(liveStore.get('dsh-step-explain/study'), 'why', 'the study pick is stored separately')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
-  assert.deepEqual(pressed(draw()), ['基础', '为什么', '关闭'], 'each group keeps its own current level')
+  assert.deepEqual(pressed(draw()), ['基础', '为什么', '关闭', '关闭'], 'each group keeps its own current level')
   press(draw(), '做什么')
-  assert.deepEqual(pressed(draw()), ['基础', '做什么', '关闭'], 'the study group follows its own pick')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '关闭', '关闭'], 'the study group follows its own pick')
   press(draw(), '下一步')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'and it returns to the default level')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'and it returns to the default level')
 
   // The model switch is a third, independent setting.
   press(draw(), '开启')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'on', 'turning the model on is stored')
   assert.equal(liveStore.get('dsh-step-explain/study'), 'plan', 'and leaves the study level alone')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '开启'], 'the switch shows as on')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '开启', '关闭'], 'the switch shows as on')
   press(draw(), '关闭')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and it can be turned off again')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'back to the cheap default')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'back to the cheap default')
+
+  // The context switch is the fourth setting, and it stores under its own key.
+  // It is the second on/off pair, so `nth` names it.
+  press(draw(), '开启', 1)
+  assert.equal(liveStore.get('dsh-step-explain/context'), 'on', 'the context switch is stored separately')
+  assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and leaves the model switch alone')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '开启'], 'only the context switch moved')
+  press(draw(), '关闭', 1)
+  assert.equal(liveStore.get('dsh-step-explain/context'), 'off', 'and it can be turned off again')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'both switches back off')
 
   React.useState = realUseState
   React.useEffect = realUseEffect
@@ -906,14 +920,39 @@ globalThis.fetch = async (url, init) => {
 }
 const writes = []
 const inputActions = { setDraft: (text) => writes.push(text) }
+// The bar reads `legacy.nodes` for the optional conversation context. These
+// tests start with an empty conversation; the context block below fills it.
+let chatNodes = []
 const drawBar = (draft) => {
   hookCursor = 0
-  return mount(built.__test.RewriteBar({ t, useInput: (select) => select({ draft }), inputActions }))
+  return mount(
+    built.__test.RewriteBar({
+      t,
+      useInput: (select) => select({ draft }),
+      useChat: (select) => select({ legacy: { nodes: chatNodes } }),
+      inputActions,
+    }),
+  )
 }
 /** Let the request promise settle, then draw what the reader would see. */
 const settle = async (draft) => {
   await new Promise((resolve) => setTimeout(resolve, 0))
   return drawBar(draft)
+}
+/**
+ * Draw a freshly mounted bar: the hook cells are cleared first, so a module-level
+ * switch flipped between draws is picked up as its initial state, the way a newly
+ * opened panel would see it.
+ */
+const freshBar = (draft) => {
+  hookState.length = 0
+  hookRefs.length = 0
+  return drawBar(draft)
+}
+/** Let a request settle, then draw a fresh bar showing what the reader would see. */
+const settleFresh = async (draft) => {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  return freshBar(draft)
 }
 const buttonNamed = (tree, label) => controlsOf(tree).find((node) => node.type === 'button' && textOf(node).trim() === label)
 
@@ -967,6 +1006,9 @@ assert.deepEqual(
   { text: '把那个 bug 修了', tone: 'detailed', lang: 'en' },
   'the request is the draft and how to shape it, with no session content',
 )
+// With the context switch off (the default) nothing about the conversation
+// leaves the browser: the key is absent, not merely empty.
+assert.ok(!('context' in posted[0].body), 'context off: no conversation is sent at all')
 
 // The result is shown, with no write to the draft until the reader accepts.
 const withResult = await settle('把那个 bug 修了')
@@ -1017,7 +1059,85 @@ assert.equal(posted[0].body.text.trim(), '原始的话', 'the rewrite is redone 
 assert.equal(posted[0].body.previous, 'REWRITTEN', 'the last rewrite is the context for the change')
 assert.equal(writes.length, 0, 'asking for a change never writes the draft')
 
-// A model that answers nothing is reported, and the reader's text survives.
+// --- the conversation context switch ---------------------------------
+// Off by default, and the switch must take effect on the very next run. The
+// conversation is filled here so the transcript has something to carry.
+// The cells are cleared first: earlier blocks leave the bar mid-rewrite, and a
+// stale `busy` would hide the button this block needs to press.
+hookState.length = 0
+hookRefs.length = 0
+{
+  chatNodes = [
+    { kind: 'user', visibility: 'visible', data: { content: [{ type: 'text', text: '把那个 bug 修了' }] } },
+    { kind: 'assistant-step', visibility: 'visible', data: { content: [{ type: 'text', text: '修好了，是登录页的空指针。' }] } },
+    { kind: 'tool-call', visibility: 'visible', data: { root: { name: 'read', argsRaw: '{"file_path":"secret.ts"}' } } },
+  ]
+  globalThis.fetch = async (url, init = {}) => {
+    posted.push({ url, body: JSON.parse(init.body) })
+    return { ok: true, json: async () => ({ text: 'REWRITTEN' }) }
+  }
+
+  // The switch is visible in the bar, and starts off.
+  const off = drawBar('把那个 bug 修了')
+  assert.ok(textOf(off).includes('读取对话：关'), 'the bar shows the switch, and it starts off')
+  assert.ok(textOf(off).includes('不读取对话内容'), 'and says what off means')
+
+  posted.length = 0
+  buttonNamed(drawBar('把那个 bug 修了'), '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  assert.ok(!('context' in posted[0].body), 'off: the request carries no conversation')
+
+  // Turn it on from the bar: the next run must carry the conversation at once.
+  built.__test.setContext(true)
+  const on = freshBar('把那个 bug 修了')
+  assert.ok(textOf(on).includes('读取对话：开'), 'the bar shows the switch as on')
+  posted.length = 0
+  buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  const sent = posted[0].body
+  assert.equal(typeof sent.context, 'string', 'on: the request carries the conversation')
+  assert.ok(sent.context.includes('把那个 bug 修了'), 'including what the reader said')
+  assert.ok(sent.context.includes('修好了，是登录页的空指针。'), 'and what the assistant replied')
+  assert.ok(!sent.context.includes('secret.ts'), 'but never tool arguments')
+  assert.ok(sent.context.length <= 4000, 'and never more than the cap')
+
+  // Turning it back off takes effect on the next run, with no reload.
+  built.__test.setContext(false)
+  posted.length = 0
+  buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  assert.ok(!('context' in posted[0].body), 'turning it off again stops sending the conversation')
+
+  // Consecutive runs keep following the switch, in both directions.
+  built.__test.setContext(true)
+  posted.length = 0
+  buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  assert.equal(posted.length, 2, 'two runs, two requests')
+  assert.ok(posted.every((each) => typeof each.body.context === 'string'), 'both runs carry the conversation')
+
+  // The transcript keeps the newest exchanges and drops the oldest.
+  const long = Array.from({ length: 40 }, (unused, index) => ({
+    kind: index % 2 === 0 ? 'user' : 'assistant-step',
+    visibility: 'visible',
+    data: { content: [{ type: 'text', text: `第${index}条 ${'x'.repeat(200)}` }] },
+  }))
+  const clipped = built.__test.transcriptOf(long, 4000)
+  assert.ok(clipped.length <= 4000, 'the transcript respects its cap')
+  assert.ok(clipped.includes('第39条'), 'the newest exchange is kept')
+  assert.ok(!clipped.includes('第0条'), 'and the oldest is dropped')
+
+  // Hidden nodes never reach the transcript.
+  assert.ok(
+    !built.__test.transcriptOf([{ kind: 'user', visibility: 'hidden', data: { content: [{ type: 'text', text: '隐藏的话' }] } }], 4000).includes('隐藏的话'),
+    'a hidden node is not part of the context',
+  )
+
+  chatNodes = []
+  built.__test.setContext(false)
+}
 globalThis.fetch = async () => ({ ok: true, json: async () => ({ text: '' }) })
 posted.length = 0
 assert.equal(await built.__test.fetchRewrite({ text: '原始的话', tone: 'detailed', lang: 'zh' }), '', 'an empty answer is no rewrite')
