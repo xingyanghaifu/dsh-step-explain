@@ -136,9 +136,16 @@ Everything on all three levels is local rule text. **No level sends anything any
 
 The impact and reversible lines always stay local, because they are the facts the reader decides on; a model that times out or is unconfigured can never leave you without them. While an answer is in flight the rule text is shown, so the panel is never blank.
 
+The switch covers every surface, the approval dialog included. That dialog also keeps its own **Model notes** level, which asks for a model paragraph even when the switch is off.
+
 **This costs tokens.** Each step is a separate request: the tool name, its raw arguments, and a short answer (capped at 200 tokens for the shortest study level, 320 for the fuller ones). A ten-step turn is ten requests. That spend comes out of your current model quota and is billed separately from the chat itself. The settings page states this in a warning line under the switch.
 
-A model-written explanation carries a footer saying so, so it is never mistaken for the rule text.
+Two things keep the bill down without changing what you see:
+
+- **Answers are cached** per call and level, so collapsing and reopening a summary, or switching a level away and back, costs nothing the second time.
+- **Requests run one at a time.** A ten-step summary would otherwise fire ten concurrent calls at the same provider, which invites a rate limit that fails all of them. Serial costs latency, never extra tokens.
+
+A model-written explanation carries a footer saying so, so it is never mistaken for the rule text, and it is clipped at 240 characters so a chatty model cannot push the impact and undo lines off screen.
 
 ## The Model notes level (optional, uses a model)
 

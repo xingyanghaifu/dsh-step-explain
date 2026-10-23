@@ -222,7 +222,9 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
   const draw = () => {
     cursor = 0
     queued = []
-    const tree = built.__test.Detail({ info, t })
+    // `Detail` now nests `Explanation`, so the tree must be expanded the way the
+    // renderer would; calling the component alone would skip the child.
+    const tree = mount(built.__test.Detail({ info, t }))
     const effects = queued
     queued = []
     for (const effect of effects) effect()
@@ -264,6 +266,45 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
   assert.ok(replaced.includes('影响：') && replaced.includes('能否撤回：'), 'the local impact and undo lines survive')
   assert.ok(replaced.includes('以上解释由模型生成'), 'and the text says a model wrote it')
 
+  // The same call is not asked twice: reopening a summary must be free.
+  const before = asked.length
+  cells = []
+  draw()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(asked.length, before, 'a repeat view of the same call comes from the cache, not the model')
+
+  // One request at a time, so a ten-step summary cannot fire ten at once.
+  {
+    let inFlight = 0
+    let peak = 0
+    globalThis.fetch = async (url, init = {}) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      inFlight -= 1
+      asked.push({ url, body: init.body === undefined ? undefined : JSON.parse(init.body) })
+      return { ok: true, json: async () => ({ detail: `答案${asked.length}` }) }
+    }
+    // Three different calls at once, as an expanded summary would produce.
+    const other = ['a.ts', 'b.ts', 'c.ts'].map((file) => built.__test.explain('read', JSON.stringify({ file_path: file }), t))
+    cells = []
+    cursor = 0
+    queued = []
+    const trees = other.map((each) => mount(built.__test.Detail({ info: each, t })))
+    const effects = queued
+    queued = []
+    for (const effect of effects) effect()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(peak, 1, 'explanation requests are serialised, never concurrent')
+    assert.equal(asked.length, 3, 'and every call still gets its own answer')
+    void trees
+  }
+
+  // A chatty model cannot push the impact and undo lines off screen.
+  assert.equal(built.__test.clipModelLine('x'.repeat(400)).length, 240, 'a long answer is clipped to the layout limit')
+  assert.ok(built.__test.clipModelLine('x'.repeat(400)).endsWith('…'), 'and ends with an ellipsis')
+  assert.equal(built.__test.clipModelLine('  short   one  '), 'short one', 'a short answer is only flattened')
+
   built.__test.setExplain(false)
   globalThis.fetch = realFetch
   React.useState = realUseState
@@ -288,6 +329,94 @@ assert.ok(approvalText.includes('详细程度：基础'), 'the level button star
 assert.ok(approvalText.includes('当前在做什么'), 'the approval names the current action')
 assert.ok(approvalText.includes('为什么这样做'), 'the default study level explains why')
 assert.ok(approvalText.includes('下一步可能'), 'and what commonly comes next')
+
+// The switch must reach the approval dialog too: it is one of the surfaces the
+// setting promises, and it was the one that used to ignore it.
+{
+  const asked = []
+  const realFetch = globalThis.fetch
+  const realUseState = React.useState
+  const realUseEffect = React.useEffect
+  let cells = []
+  let cursor = 0
+  let queued = []
+  React.useState = (initial) => {
+    const index = cursor++
+    if (!(index in cells)) cells[index] = initial
+    return [cells[index], (next) => (cells[index] = typeof next === 'function' ? next(cells[index]) : next)]
+  }
+  React.useEffect = (fn) => queued.push(fn)
+  globalThis.fetch = async (url, init = {}) => {
+    asked.push({ url, body: init.body === undefined ? undefined : JSON.parse(init.body) })
+    return { ok: true, json: async () => ({ detail: '模型写的审批说明' }) }
+  }
+  const snap = snapshotOf([
+    { kind: 'tool-call', data: { root: { phase: 'start', callId: 'c5', name: 'pwsh', argsRaw: '{"command":"npm test"}' } } },
+  ])
+  // `fresh` resets the hook cells (a newly mounted tree); the default keeps them
+  // so a second draw shows what the reader sees after the answer lands.
+  const drawApproval = (fresh = true) => {
+    if (fresh) cells = []
+    cursor = 0
+    queued = []
+    const tree = mount(built.__test.ApprovalDetail({ callId: 'c5', useChat: (select) => select(snap), t }))
+    const effects = queued
+    queued = []
+    for (const effect of effects) effect()
+    return tree
+  }
+
+  // Switch off and the dialog's level on "basic": no request at all.
+  built.__test.setExplain(false)
+  built.__test.setDetail('rule')
+  drawApproval()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(asked.length, 0, 'off and basic: the approval dialog asks no model')
+
+  // Switch on: the dialog explains through the model, like every other surface.
+  built.__test.setExplain(true)
+  drawApproval()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(asked.length >= 1, 'on: the approval dialog asks the model too')
+  // Same state, drawn again: this is what the reader sees after the answer lands.
+  const withModel = textOf(drawApproval(false))
+  assert.ok(withModel.includes('模型写的审批说明'), 'on: the dialog shows the model text')
+
+  // The dialog's own "model notes" level still works with the switch off. A
+  // different command is used because the answer for the previous one is cached.
+  asked.length = 0
+  built.__test.setExplain(false)
+  built.__test.setDetail('model')
+  const otherSnap = snapshotOf([
+    { kind: 'tool-call', data: { root: { phase: 'start', callId: 'c6', name: 'pwsh', argsRaw: '{"command":"npm run build"}' } } },
+  ])
+  cells = []
+  cursor = 0
+  queued = []
+  mount(built.__test.ApprovalDetail({ callId: 'c6', useChat: (select) => select(otherSnap), t }))
+  const pending = queued
+  queued = []
+  for (const effect of pending) effect()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(asked.length >= 1, 'the model-notes level still asks on its own, without the switch')
+  // Its waiting text names that trigger, not the global switch.
+  cells = []
+  cursor = 0
+  queued = []
+  const waiting = mount(built.__test.ApprovalDetail({ callId: 'c7', useChat: (select) => select(snapshotOf([
+    { kind: 'tool-call', data: { root: { phase: 'start', callId: 'c7', name: 'pwsh', argsRaw: '{"command":"npm run lint"}' } } },
+  ])), t }))
+  const pending2 = queued
+  queued = []
+  for (const effect of pending2) effect()
+  assert.ok(textOf(waiting).includes('正在让模型补充这一档的说明'), 'and its waiting text names that trigger')
+
+  built.__test.setDetail('rule')
+  built.__test.setExplain(false)
+  globalThis.fetch = realFetch
+  React.useState = realUseState
+  React.useEffect = realUseEffect
+}
 // The cell may own a toggle, but never an answer: the shipped dialog decides.
 // Its Enter handler skips `button`, and every control here is type="button".
 const controlsOf = (node) =>
