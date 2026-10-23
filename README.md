@@ -125,8 +125,18 @@ The warning line is missing above because `npm test` does not look destructive. 
 - **Why** adds what this kind of operation is normally for: reading to see before changing, writing to make a worked-out change take effect, running to confirm from real output, and so on.
 - **Next** adds what commonly follows: read → more reading or a change, write → a test or command, command → read the output and decide, question → wait for your answer.
 
-Everything on all three levels is local rule text. **No level sends anything anywhere**; the study level is independent of the Model notes level, which is the only one that goes online.
+Everything on all three levels is local rule text. **No level sends anything anywhere**; the study level is independent of the model switch and the Model notes level, which are the two things that can go online.
 
+## Letting the current model explain each step (off by default)
+
+**Settings → Step Explain → Let the current model explain each step** turns the rule text into rule text *plus* one model-written line, on every surface: each expanded step, the turn summary, and the approval dialog. It is off by default.
+
+- **Off** — everything is generated on this machine. No request, no tokens, no network.
+- **On** — every tool call sends its own request to the current model (or the one picked above) and appends what comes back, labelled so it is never mistaken for rule text.
+
+**This costs tokens.** Each step is a separate request: the tool name, its raw arguments, and a short answer capped at 200 tokens. A ten-step turn is ten requests. That spend comes out of your current model quota and is billed separately from the chat itself. The settings page says so in a warning line under the switch.
+
+The rule text is never replaced — the model line is appended, so a slow, failed or unconfigured model simply means that one line does not appear and everything else still works.
 
 ## The Model notes level (optional, uses a model)
 

@@ -196,6 +196,69 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
   built.__test.setStudy('plan')
 }
 
+// --- the model switch ------------------------------------------------
+// Off must mean no request at all: this is the difference between "free and
+// local" and "one API call per step", so it is asserted at the fetch boundary.
+// A live hook runtime is used because the request is issued from an effect,
+// and `render` above calls components without committing effects.
+{
+  const asked = []
+  const realFetch = globalThis.fetch
+  const realUseState = React.useState
+  const realUseEffect = React.useEffect
+  let cells = []
+  let cursor = 0
+  let queued = []
+  React.useState = (initial) => {
+    const index = cursor++
+    if (!(index in cells)) cells[index] = initial
+    return [cells[index], (next) => (cells[index] = typeof next === 'function' ? next(cells[index]) : next)]
+  }
+  React.useEffect = (fn) => queued.push(fn)
+  globalThis.fetch = async (url, init = {}) => {
+    asked.push({ url, body: init.body === undefined ? undefined : JSON.parse(init.body) })
+    return { ok: true, json: async () => ({ detail: '模型写的一句说明' }) }
+  }
+  const draw = () => {
+    cursor = 0
+    queued = []
+    const tree = built.__test.Detail({ info, t })
+    const effects = queued
+    queued = []
+    for (const effect of effects) effect()
+    return tree
+  }
+  const info = built.__test.explain('read', '{"file_path":"a.ts"}', t)
+  built.__test.setExplain(false)
+  cells = []
+  draw()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(asked.length, 0, 'with the switch off, no step asks any model')
+
+  built.__test.setExplain(true)
+  cells = []
+  draw()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(asked.length, 1, 'with it on, one request per step')
+  assert.equal(asked[0].url, 'api/step-explain.detail', 'and it goes to the detail route')
+  assert.deepEqual(
+    { name: asked[0].body.name, argsRaw: asked[0].body.argsRaw },
+    { name: 'read', argsRaw: '{"file_path":"a.ts"}' },
+    'carrying the same call the rule text explained, and nothing else',
+  )
+  assert.ok(
+    Object.keys(asked[0].body).every((key) => ['name', 'argsRaw', 'lang'].includes(key)),
+    'no session content leaves the browser',
+  )
+  // The rule text is still there, so the model line is additive, not a replacement.
+  assert.ok(textOf(draw()).includes('当前在做什么'), 'the rule text stays when the model line is on')
+
+  built.__test.setExplain(false)
+  globalThis.fetch = realFetch
+  React.useState = realUseState
+  React.useEffect = realUseEffect
+}
+
 // The approval cell explains the correlated call and names both outcomes.
 const approval = render(
   built.__test.ApprovalDetail,
@@ -525,16 +588,16 @@ assert.ok(!pageText.includes('详细程度：基础'), 'the button does not repe
 // Two three-level groups now: the approval dialog's detail and the study level.
 // They are separate settings, so each keeps its own set of three buttons.
 const levelButtons = controlsOf(page).filter((node) => node.type === 'button')
-assert.equal(levelButtons.length, 6, 'the page shows both three-level groups at once')
+assert.equal(levelButtons.length, 8, 'the page shows both three-level groups and the on/off pair')
 assert.deepEqual(
   levelButtons.map((node) => textOf(node)),
-  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步'],
+  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步', '关闭', '开启'],
   'each button is labelled with its level only',
 )
 assert.deepEqual(
   levelButtons.map((node) => node.props['aria-pressed']),
-  [true, false, false, false, false, true],
-  'each group marks its own current level: Basic for the dialog, the fullest for study',
+  [true, false, false, false, false, true, true, false],
+  'each group marks its own current level: Basic for the dialog, the fullest for study, off for the model switch',
 )
 // The level control must be reachable: the row that holds it lets the group
 // wrap and grow rather than clipping it out of the scroll column.
@@ -637,26 +700,35 @@ assert.ok(
   }
   const pressed = (tree) => controlsOf(tree).filter((node) => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf)
 
-  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'the page opens on each group’s own default')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'the page opens on each group’s own default')
   press(draw(), '完整说明')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'full', 'the click is stored')
-  assert.deepEqual(pressed(draw()), ['完整说明', '下一步'], 'and the re-rendered page shows it as current')
+  assert.deepEqual(pressed(draw()), ['完整说明', '下一步', '关闭'], 'and the re-rendered page shows it as current')
   press(draw(), '模型补充')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'model', 'another level is picked the same way')
-  assert.deepEqual(pressed(draw()), ['模型补充', '下一步'], 'the page follows the new pick')
+  assert.deepEqual(pressed(draw()), ['模型补充', '下一步', '关闭'], 'the page follows the new pick')
   // Back to basic, so the rest of the file starts where it expects to.
   press(draw(), '基础')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'and it can go back')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'and it can go back')
 
   // The study level is its own setting: it moves without touching the detail one.
   press(draw(), '为什么')
   assert.equal(liveStore.get('dsh-step-explain/study'), 'why', 'the study pick is stored separately')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
-  assert.deepEqual(pressed(draw()), ['基础', '为什么'], 'each group keeps its own current level')
+  assert.deepEqual(pressed(draw()), ['基础', '为什么', '关闭'], 'each group keeps its own current level')
   press(draw(), '做什么')
-  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'the study group follows its own pick')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '关闭'], 'the study group follows its own pick')
   press(draw(), '下一步')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'and it returns to the default level')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'and it returns to the default level')
+
+  // The model switch is a third, independent setting.
+  press(draw(), '开启')
+  assert.equal(liveStore.get('dsh-step-explain/explain'), 'on', 'turning the model on is stored')
+  assert.equal(liveStore.get('dsh-step-explain/study'), 'plan', 'and leaves the study level alone')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '开启'], 'the switch shows as on')
+  press(draw(), '关闭')
+  assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and it can be turned off again')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭'], 'back to the cheap default')
 
   React.useState = realUseState
   React.useEffect = realUseEffect

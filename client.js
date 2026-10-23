@@ -99,6 +99,8 @@ window.__ModuleLoader__.load({
         risk,
         danger,
         tool,
+        // Kept so a surface can ask the model about the same call it explained.
+        argsRaw,
         label,
         target,
         now: t(`cat.${cat}.what`),
@@ -466,6 +468,45 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether every step's explanation goes to the current model, not only the
+     * approval dialog's. Off by default: each step is one request, so the reader
+     * opts in. Stored per browser like the other levels.
+     */
+    const EXPLAIN_KEY = 'dsh-step-explain/explain'
+    let explainByModel = readExplain()
+    const explainListeners = new Set()
+
+    /** Read the stored switch; a blocked read keeps the cheap default (off). */
+    function readExplain() {
+      try {
+        return globalThis.localStorage?.getItem(EXPLAIN_KEY) === 'on'
+      } catch {
+        return false
+      }
+    }
+
+    /** Store the switch for every surface; a blocked write only loses it. */
+    function setExplain(next) {
+      explainByModel = next === true
+      try {
+        globalThis.localStorage?.setItem(EXPLAIN_KEY, explainByModel ? 'on' : 'off')
+      } catch {
+        // Private mode or a full quota: the switch lasts for this page.
+      }
+      for (const notify of explainListeners) notify(explainByModel)
+    }
+
+    /** The switch, shared by every rendered surface. */
+    function useExplainByModel() {
+      const [on, setOn] = React.useState(explainByModel)
+      React.useEffect(() => {
+        explainListeners.add(setOn)
+        return () => explainListeners.delete(setOn)
+      }, [])
+      return on
+    }
+
+    /**
      * Model paragraph for one call: `undefined` while asking, `''` when the
      * Host could not answer, and the text once it does.
      */
@@ -717,6 +758,7 @@ window.__ModuleLoader__.load({
 .dse-page-section{margin-top:20px;font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-label-tertiary);text-transform:none}
 .dse-page-about{margin-top:8px;color:var(--dsw-alias-label-secondary)}
 .dse-page-about p{margin:0 0 6px}
+.dse-page-cost{margin:8px 0 0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-warn-primary);white-space:pre-wrap;overflow-wrap:anywhere}
 .dse-levels{flex:none;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;min-width:0}
 /* Three level buttons are wider than the right-hand column at narrow widths,
    so this row stacks instead of squeezing them out of reach. */
@@ -764,10 +806,16 @@ window.__ModuleLoader__.load({
      * The explanation lines shared by every surface, at the reader's study
      * level: the action is always named, `why` adds what it is usually for, and
      * `plan` adds what commonly comes next. The effect and undo lines follow.
+     *
+     * When the model switch is on, one model-written line is appended per call.
+     * It is additive: the rule text above is what the reader always gets, so a
+     * failed or slow request only means that extra line does not appear.
      */
     function Detail({ info, t }) {
       const level = useStudyLevel()
+      const byModel = useExplainByModel()
       const parts = studyParts(level)
+      const model = useModelDetail({ name: info.tool, argsRaw: info.argsRaw }, byModel && info.tool !== '', langNow())
       return h(
         'div',
         { className: 'dse-body' },
@@ -776,6 +824,8 @@ window.__ModuleLoader__.load({
         parts.includes('plan') && h('div', { className: 'dse-line' }, t('next.line', { next: info.next })),
         h('div', { className: 'dse-line' }, t('effect.line', { effect: info.effect })),
         h('div', { className: 'dse-line' }, t('undo.line', { undo: info.undo })),
+        // The model line is labelled, so it is never mistaken for rule text.
+        byModel && model !== '' && h('div', { className: model === undefined ? 'dse-muted' : 'dse-line' }, model ?? t('detail.waiting')),
       )
     }
 
@@ -866,6 +916,7 @@ window.__ModuleLoader__.load({
     function SettingsPage({ t }) {
       const level = useDetailLevel()
       const study = useStudyLevel()
+      const byModel = useExplainByModel()
       const picker = useModelPicker()
       /** One labelled control in the page's row rhythm. */
       const row = (title, body, control, extra) =>
@@ -938,6 +989,34 @@ window.__ModuleLoader__.load({
 
         h('div', { className: 'dse-page-section' }, t('page.section.model')),
         row(t('settings.title'), t(picker.description), picker.select(t)),
+        row(
+          t('page.modelExplain.title'),
+          t('page.modelExplain.body'),
+          h(
+            'div',
+            { className: 'dse-levels', role: 'group', 'aria-label': t('page.modelExplain.title') },
+            [
+              ['off', false],
+              ['on', true],
+            ].map(([key, value]) =>
+              h(
+                'button',
+                {
+                  key,
+                  type: 'button',
+                  className: byModel === value ? 'dse-btn dse-btn-on' : 'dse-btn',
+                  'aria-pressed': byModel === value,
+                  onClick: () => setExplain(value),
+                },
+                t(`page.modelExplain.${key}`),
+              ),
+            ),
+          ),
+          'dse-setting-levels',
+        ),
+        // The cost line is its own paragraph, so it is read before the switch is
+        // flipped rather than after.
+        h('p', { className: 'dse-page-cost' }, t('page.modelExplain.cost')),
 
         h('div', { className: 'dse-page-section' }, t('page.section.about')),
         h(
@@ -1175,6 +1254,11 @@ window.__ModuleLoader__.load({
       'page.level.title': '审批框的说明档位',
       'page.level.body': '基础档只讲规则，不联网；模型补充档再多一段模型写的说明；完整说明档把审批框本身拆成五段讲清楚。只改说明文字，不改审批流程。',
       'page.section.model': '模型',
+      'page.modelExplain.title': '让当前模型解释每一步',
+      'page.modelExplain.body': '开启后，聊天里每一步的展开说明、每轮汇总和审批框都会多一行由当前模型写的话。关闭时全部由本机规则生成，不联网。',
+      'page.modelExplain.on': '开启',
+      'page.modelExplain.off': '关闭',
+      'page.modelExplain.cost': '⚠ 会增加 token 消耗：开启后，每个工具调用都会单独发一次请求（工具名 + 参数原文 + 一句回答，上限 200 token），一轮里有 10 步就是 10 次。这些消耗计入你当前的模型额度，和聊天本身分开计算。看不清收益时建议先关着，只在审批框里用「模型补充」档。',
       'page.section.about': '关于',
       'page.about.privacy': '只有「模型补充」档会把工具名和参数原文发出去；基础档和完整说明档完全在本机生成。',
       'page.about.boundary': '这个插件只做解释：它不渲染允许/拒绝按钮，不拦截 Enter / Esc，也不会替你回答审批。',
@@ -1330,6 +1414,11 @@ window.__ModuleLoader__.load({
       'page.level.title': 'Detail level of the approval box',
       'page.level.body': 'Basic is rule text only and never goes online. Model notes adds one model-written paragraph. Full spells out the approval box itself in five parts. All three change the words only, never the approval flow.',
       'page.section.model': 'Model',
+      'page.modelExplain.title': 'Let the current model explain each step',
+      'page.modelExplain.body': 'When on, every expanded step, every turn summary and the approval dialog gain one line written by the current model. When off, everything is generated locally with no network call.',
+      'page.modelExplain.on': 'On',
+      'page.modelExplain.off': 'Off',
+      'page.modelExplain.cost': '⚠ This costs tokens: with it on, every tool call sends its own request (tool name + raw arguments + one short answer, capped at 200 tokens), so a ten-step turn is ten requests. That spend counts against your current model quota and is billed separately from the chat itself. Leave it off unless the extra line earns its cost, or use the Model notes level in the approval dialog instead.',
       'page.section.about': 'About',
       'page.about.privacy': 'Only the model-notes level sends the tool name and its arguments off this machine; basic and full are generated locally.',
       'page.about.boundary': 'This plugin only explains: it renders no allow or reject control, does not intercept Enter or Escape, and never answers an approval for you.',
@@ -1439,6 +1528,8 @@ window.__ModuleLoader__.load({
         setStudy,
         studyParts,
         STUDY_LEVELS,
+        readExplain,
+        setExplain,
         Detail,
         loadModel,
         saveModel,
