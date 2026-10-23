@@ -86,14 +86,24 @@ window.__ModuleLoader__.load({
       const risk = danger ? 'high' : cat === 'read' || cat === 'search' || cat === 'ask' ? 'low' : 'medium'
       const key = `tool.${tool}`
       const own = t(key)
+      const label = own === key ? t(`cat.${cat}.label`) : own
+      // The three lines the reader asked for: what is happening now, what it is
+      // usually for, and what commonly comes next. All of them are rule text per
+      // category, never a guess at this model's motive: "usually" is the claim.
+      // `now` reuses the category's own description: the row already shows the
+      // label and the target, so repeating them here would say nothing new.
+      const why = danger ? 'why.danger' : `why.${cat}`
+      const next = danger ? 'next.danger' : `next.${cat}`
       return {
         cat,
         risk,
         danger,
         tool,
-        label: own === key ? t(`cat.${cat}.label`) : own,
+        label,
         target,
-        what: t(`cat.${cat}.what`),
+        now: t(`cat.${cat}.what`),
+        why: t(why),
+        next: t(next),
         effect: t(`cat.${cat}.effect`),
         undo: t(`cat.${cat}.undo`),
       }
@@ -139,6 +149,14 @@ window.__ModuleLoader__.load({
     // --- optional model detail -----------------------------------------
     /** Persisted per-browser switch; off unless the reader turns it on. */
     const DETAIL_KEY = 'dsh-step-explain/detail'
+    /**
+     * How much of a step's *behaviour* the reader wants explained, separate from
+     * the approval-dialog detail: `now` names the action, `why` adds what it is
+     * usually for, `plan` adds what commonly comes next. All three are rule text
+     * per category — the plugin never guesses this model's motive.
+     */
+    const STUDY_KEY = 'dsh-step-explain/study'
+    const STUDY_LEVELS = ['now', 'why', 'plan']
     /** Host route that turns one call into one short paragraph. */
     const DETAIL_ROUTE = 'api/step-explain.detail'
     /** Host route that rewrites one rough instruction. */
@@ -326,6 +344,47 @@ window.__ModuleLoader__.load({
     /** The next level in the cycle, so one button reaches all three. */
     function nextDetail(level) {
       return LEVELS[(LEVELS.indexOf(level) + 1) % LEVELS.length]
+    }
+
+    /** Saved study level; anything unreadable means only the action is named. */
+    let studyLevel = readStudy()
+    const studyListeners = new Set()
+
+    /** Read the stored study level; a blocked read means `now`. */
+    function readStudy() {
+      try {
+        const raw = globalThis.localStorage?.getItem(STUDY_KEY)
+        return STUDY_LEVELS.includes(raw) ? raw : 'now'
+      } catch {
+        return 'now'
+      }
+    }
+
+    /** Store the study level for every surface; a blocked write only loses it. */
+    function setStudy(next) {
+      studyLevel = STUDY_LEVELS.includes(next) ? next : 'now'
+      try {
+        globalThis.localStorage?.setItem(STUDY_KEY, studyLevel)
+      } catch {
+        // Private mode or a full quota: the level lasts for this page.
+      }
+      for (const notify of studyListeners) notify(studyLevel)
+    }
+
+    /** The study level, shared by every rendered surface. */
+    function useStudyLevel() {
+      const [level, setLevel] = React.useState(studyLevel)
+      React.useEffect(() => {
+        studyListeners.add(setLevel)
+        return () => studyListeners.delete(setLevel)
+      }, [])
+      return level
+    }
+
+    /** Which of `now`/`why`/`plan` a level includes, in reading order. */
+    function studyParts(level) {
+      const upto = STUDY_LEVELS.indexOf(level)
+      return STUDY_LEVELS.slice(0, upto === -1 ? 1 : upto + 1)
     }
 
     /**
@@ -696,12 +755,20 @@ window.__ModuleLoader__.load({
         : h('span', { className: 'dse-dot', style, role: 'img', 'aria-label': label })
     }
 
-    /** The three explanation lines shared by every surface. */
+    /**
+     * The explanation lines shared by every surface, at the reader's study
+     * level: the action is always named, `why` adds what it is usually for, and
+     * `plan` adds what commonly comes next. The effect and undo lines follow.
+     */
     function Detail({ info, t }) {
+      const level = useStudyLevel()
+      const parts = studyParts(level)
       return h(
         'div',
         { className: 'dse-body' },
-        h('div', { className: 'dse-line' }, info.what),
+        h('div', { className: 'dse-line' }, t('step.line', { now: info.now })),
+        parts.includes('why') && h('div', { className: 'dse-line' }, t('why.line', { why: info.why })),
+        parts.includes('plan') && h('div', { className: 'dse-line' }, t('next.line', { next: info.next })),
         h('div', { className: 'dse-line' }, t('effect.line', { effect: info.effect })),
         h('div', { className: 'dse-line' }, t('undo.line', { undo: info.undo })),
       )
@@ -793,6 +860,7 @@ window.__ModuleLoader__.load({
      */
     function SettingsPage({ t }) {
       const level = useDetailLevel()
+      const study = useStudyLevel()
       const picker = useModelPicker()
       /** One labelled control in the page's row rhythm. */
       const row = (title, body, control, extra) =>
@@ -840,6 +908,29 @@ window.__ModuleLoader__.load({
           'dse-setting-levels',
         ),
 
+        row(
+          t('page.study.title'),
+          t(`page.study.body.${study}`),
+          h(
+            'div',
+            { className: 'dse-levels', role: 'group', 'aria-label': t('page.study.title') },
+            STUDY_LEVELS.map((each) =>
+              h(
+                'button',
+                {
+                  key: each,
+                  type: 'button',
+                  className: each === study ? 'dse-btn dse-btn-on' : 'dse-btn',
+                  'aria-pressed': each === study,
+                  onClick: () => setStudy(each),
+                },
+                t(`study.${each}`),
+              ),
+            ),
+          ),
+          'dse-setting-levels',
+        ),
+
         h('div', { className: 'dse-page-section' }, t('page.section.model')),
         row(t('settings.title'), t(picker.description), picker.select(t)),
 
@@ -857,6 +948,7 @@ window.__ModuleLoader__.load({
     function ApprovalDetail({ callId, useChat, t }) {
       const root = useChat((snapshot) => rootOf(snapshot.nodes.values(), callId))
       const level = useDetailLevel()
+      const study = useStudyLevel()
       const call = callOf(root)
       // Hooks run before the early return so the order never changes.
       const model = useModelDetail(call, level === 'model' && root !== undefined, langNow())
@@ -892,7 +984,12 @@ window.__ModuleLoader__.load({
             t(`detail.${level}`),
           ),
         ),
-        h('div', { className: 'dse-line' }, info.what),
+        // The approval dialog is where a command is decided, so it carries the
+        // study lines too — same level as the rest of the plugin, never a guess
+        // at this model's motive.
+        h('div', { className: 'dse-line' }, t('step.line', { now: info.now })),
+        studyParts(study).includes('why') && h('div', { className: 'dse-line' }, t('why.line', { why: info.why })),
+        studyParts(study).includes('plan') && h('div', { className: 'dse-line' }, t('next.line', { next: info.next })),
         command !== '' && h('code', { className: 'dse-code' }, command),
         info.danger && h('div', { className: 'dse-warn' }, t('approval.danger')),
         // `full` spells out the dialog itself, on top of the rule text above.
@@ -1016,6 +1113,25 @@ window.__ModuleLoader__.load({
       'toggle.each': '逐步展开',
       'effect.line': '影响：{effect}',
       'undo.line': '能否撤回：{undo}',
+      'step.line': '当前在做什么：{now}',
+      'why.line': '为什么这样做：{why}',
+      'next.line': '下一步可能：{next}',
+      'why.read': '通常是为了先把要改的东西看清楚，避免凭猜测动手。',
+      'why.search': '通常是先定位相关位置，再决定读哪些、改哪些。',
+      'why.write': '通常是把已经想清楚的改动落盘，让结果真正生效。',
+      'why.exec': '通常是为了验证、构建或运行，用真实输出确认结果，而不是只靠推断。',
+      'why.net': '通常是本机信息不够，需要取回外部资料再继续。',
+      'why.ask': '通常是它自己无法替你决定，需要你补一条只有你知道的信息。',
+      'why.control': '通常是先把进度记下来，方便后续步骤对齐。',
+      'why.danger': '这条命令会删除或覆盖数据，通常是在做清理或重置；执行前务必看清目标。',
+      'next.read': '下一步多半是继续读相关文件，或基于内容开始改动。',
+      'next.search': '下一步多半是打开命中的文件，或换一组关键词再找。',
+      'next.write': '下一步多半是运行测试或命令，确认这次改动没问题。',
+      'next.exec': '下一步多半是看输出决定：通过就继续，报错就回来改。',
+      'next.net': '下一步多半是用取回的内容继续推理，或再查一条补充信息。',
+      'next.ask': '下一步要等你回答后才会继续。',
+      'next.control': '下一步多半是接着推进这些记录里的任务。',
+      'next.danger': '下一步取决于你答不答应；拒绝的话它通常会换个更安全的做法。',
       'turn.part': '{label} {count}',
       'turn.summary': '本轮 {count} 步 · {parts}',
       'approval.allow': '点“允许”：{effect}',
@@ -1044,6 +1160,13 @@ window.__ModuleLoader__.load({
       'page.title': '步骤说明',
       'page.lead': '把模型正在做的每一步翻成能看懂的中文，并在需要你批准时把审批框讲清楚。下面两项决定它说多少、用哪个模型。',
       'page.section.explain': '说明的详细程度',
+      'page.study.title': '行为学习等级',
+      'page.study.body.now': '只说明当前这一步在做什么。',
+      'page.study.body.why': '在「做什么」之外，再说明这类操作通常是为了什么。',
+      'page.study.body.plan': '再加上下一步可能做什么，方便你跟着理解它的节奏。',
+      'study.now': '做什么',
+      'study.why': '为什么',
+      'study.plan': '下一步',
       'page.level.title': '审批框的说明档位',
       'page.level.body': '基础档只讲规则，不联网；模型补充档再多一段模型写的说明；完整说明档把审批框本身拆成五段讲清楚。只改说明文字，不改审批流程。',
       'page.section.model': '模型',
@@ -1145,6 +1268,25 @@ window.__ModuleLoader__.load({
       'toggle.each': 'Step by step',
       'effect.line': 'Effect: {effect}',
       'undo.line': 'Reversible: {undo}',
+      'step.line': 'What it is doing: {now}',
+      'why.line': 'Why this step: {why}',
+      'next.line': 'Likely next: {next}',
+      'why.read': 'Usually to see what is there before changing anything, rather than acting on a guess.',
+      'why.search': 'Usually to locate the relevant spots first, then decide what to read and what to change.',
+      'why.write': 'Usually to put a change that is already worked out onto disk, so it actually takes effect.',
+      'why.exec': 'Usually to verify, build or run, confirming the result from real output instead of assuming it.',
+      'why.net': 'Usually because this machine does not hold the answer, so outside material is fetched first.',
+      'why.ask': 'Usually because it cannot decide for you and needs one fact only you know.',
+      'why.control': 'Usually to record progress so later steps stay aligned.',
+      'why.danger': 'This command deletes or overwrites data, usually as cleanup or a reset; read the target before allowing it.',
+      'next.read': 'Most likely it keeps reading related files, or starts changing something based on them.',
+      'next.search': 'Most likely it opens a matched file, or searches again with different words.',
+      'next.write': 'Most likely it runs a test or command to confirm this change is sound.',
+      'next.exec': 'Most likely it reads the output and decides: carry on if it passes, come back and fix it if not.',
+      'next.net': 'Most likely it continues from what came back, or fetches one more piece of information.',
+      'next.ask': 'It waits for your answer before going on.',
+      'next.control': 'Most likely it carries on with the tasks recorded there.',
+      'next.danger': 'What happens next depends on your answer; if you reject it, it usually finds a safer way.',
       'turn.part': '{label} {count}',
       'turn.summary': '{count} steps this turn · {parts}',
       'approval.allow': 'Allow: {effect}',
@@ -1173,6 +1315,13 @@ window.__ModuleLoader__.load({
       'page.title': 'Step explanation',
       'page.lead': 'Turns each step the model takes into plain language, and explains the approval box when your answer is needed. The two settings below decide how much it says and which model writes it.',
       'page.section.explain': 'How much it explains',
+      'page.study.title': 'How much it teaches',
+      'page.study.body.now': 'Names what the current step is doing.',
+      'page.study.body.why': 'Adds what this kind of step is usually for.',
+      'page.study.body.plan': 'Also adds what commonly comes next, so you can follow its rhythm.',
+      'study.now': 'What',
+      'study.why': 'Why',
+      'study.plan': 'Next',
       'page.level.title': 'Detail level of the approval box',
       'page.level.body': 'Basic is rule text only and never goes online. Model notes adds one model-written paragraph. Full spells out the approval box itself in five parts. All three change the words only, never the approval flow.',
       'page.section.model': 'Model',
@@ -1281,6 +1430,11 @@ window.__ModuleLoader__.load({
         setDetail,
         nextDetail,
         LEVELS,
+        readStudy,
+        setStudy,
+        studyParts,
+        STUDY_LEVELS,
+        Detail,
         loadModel,
         saveModel,
         setModel,

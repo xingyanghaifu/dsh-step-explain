@@ -34,7 +34,9 @@ assert.equal(read.cat, 'read')
 assert.equal(read.risk, 'low')
 assert.equal(read.target, 'README.md')
 assert.equal(read.danger, false)
-assert.ok(read.what.length > 0 && read.effect.length > 0 && read.undo.length > 0, 'explanation lines are empty')
+assert.ok(read.now.length > 0 && read.why.length > 0 && read.next.length > 0, 'the study lines are empty')
+assert.ok(read.effect.length > 0 && read.undo.length > 0, 'explanation lines are empty')
+assert.equal(read.what, undefined, 'the old what field is gone, replaced by now')
 
 const write = explain('write', JSON.stringify({ file_path: 'src/a.ts', content: 'x' }), t)
 assert.equal(write.risk, 'medium', 'a write must not read as low risk')
@@ -43,6 +45,9 @@ const risky = explain('pwsh', JSON.stringify({ command: 'Remove-Item -Recurse -F
 assert.equal(risky.cat, 'exec')
 assert.equal(risky.risk, 'high', 'a recursive delete must be flagged')
 assert.equal(risky.danger, true)
+// A dangerous command gets the danger wording, not the calm exec wording.
+assert.ok(risky.why.includes('删除或覆盖'), 'a dangerous command explains its danger')
+assert.ok(risky.next.includes('取决于你答不答应'), 'and says the next step depends on the answer')
 
 const plain = explain('pwsh', JSON.stringify({ command: 'npm test' }), t)
 assert.equal(plain.danger, false, 'a plain command must not be flagged')
@@ -58,7 +63,9 @@ assert.equal(explain('read', '[1,2]', t).target, '', 'a JSON array is not an arg
 
 // Unknown tools still answer with words, not keys.
 const unknown = explain('some_future_tool', '{}', t)
-assert.ok(unknown.what !== 'cat.control.what' && !unknown.what.startsWith('cat.'), 'unknown category leaked a key')
+for (const field of ['now', 'why', 'next', 'effect', 'undo']) {
+  assert.ok(!unknown[field].startsWith('cat.') && !unknown[field].startsWith('why.') && !unknown[field].startsWith('next.'), `unknown category leaked a key in ${field}`)
+}
 const cordsTool = explain('cordis_inspect_list', '{}', t)
 assert.equal(cordsTool.cat, 'read', 'inspectors are read-only')
 
@@ -166,6 +173,28 @@ const summary = render(built.__test.TurnSummary, { turn: { turn: 2 } }, snapshot
 assert.ok(textOf(summary).includes('本轮 2 步'), 'summary counts the turn steps')
 assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
 
+// The shared Detail block is what every expanded surface shows, so its study
+// lines are checked directly: a regression here would silently flatten two of
+// the three levels everywhere at once.
+{
+  const info = built.__test.explain('read', '{"file_path":"a.ts"}', t)
+  const expanded = (study) => {
+    built.__test.setStudy(study)
+    return textOf(render(built.__test.Detail, { info }))
+  }
+  const atNow = expanded('now')
+  assert.ok(atNow.includes('当前在做什么'), 'the detail block names the action')
+  assert.ok(!atNow.includes('为什么这样做') && !atNow.includes('下一步可能'), 'at the first level it adds neither')
+  assert.ok(atNow.includes('影响：') && atNow.includes('能否撤回：'), 'and keeps the effect and undo lines')
+  const atWhy = expanded('why')
+  assert.ok(atWhy.includes('为什么这样做'), 'the second level adds the why line')
+  assert.ok(!atWhy.includes('下一步可能'), 'still without the next line')
+  const atPlan = expanded('plan')
+  assert.ok(atPlan.includes('下一步可能'), 'the third level adds the next line')
+  assert.ok(atPlan.length > atWhy.length && atWhy.length > atNow.length, 'and each level is longer than the last')
+  built.__test.setStudy('now')
+}
+
 // The approval cell explains the correlated call and names both outcomes.
 const approval = render(
   built.__test.ApprovalDetail,
@@ -179,6 +208,11 @@ assert.ok(approvalText.includes('点“允许”') && approvalText.includes('点
 assert.ok(approvalText.includes('删除或覆盖数据'), 'dangerous command gets the warning line')
 assert.ok(!approvalText.includes('影响：'), 'approval does not repeat the generic lines')
 assert.ok(approvalText.includes('详细程度：基础'), 'the level button starts at the basic level')
+// Study level: the default names the action and nothing more, so the reader is
+// not handed a "why" they did not ask for.
+assert.ok(approvalText.includes('当前在做什么'), 'the approval names the current action')
+assert.ok(!approvalText.includes('为什么这样做'), 'the default study level adds no why line')
+assert.ok(!approvalText.includes('下一步可能'), 'and no next line either')
 // The cell may own a toggle, but never an answer: the shipped dialog decides.
 // Its Enter handler skips `button`, and every control here is type="button".
 const controlsOf = (node) =>
@@ -350,6 +384,60 @@ assert.ok(modelLevel.includes('正在让模型补充这一档的说明'), 'the m
 assert.ok(!modelLevel.includes('这个框是干什么的'), 'the model level does not print the full explanation')
 built.__test.setDetail('rule')
 
+// --- study level ------------------------------------------------------
+// Three levels that must add, never replace: naming the action, then why this
+// kind of step exists, then what commonly comes next. Each one must be visibly
+// different from the one below it, or the setting does nothing.
+{
+  const drawAt = (study) => {
+    built.__test.setStudy(study)
+    return textOf(
+      render(
+        built.__test.ApprovalDetail,
+        { callId: 'c5' },
+        snapshotOf([{ kind: 'tool-call', data: { root: { phase: 'start', callId: 'c5', name: 'read', argsRaw: '{"file_path":"a.ts"}' } } }]),
+      ),
+    )
+  }
+  const now = drawAt('now')
+  const why = drawAt('why')
+  const plan = drawAt('plan')
+
+  assert.ok(now.includes('当前在做什么'), 'the first study level names the action')
+  assert.ok(!now.includes('为什么这样做') && !now.includes('下一步可能'), 'and only that')
+
+  assert.ok(why.includes('当前在做什么'), 'the second level keeps the action')
+  assert.ok(why.includes('为什么这样做'), 'and adds why')
+  assert.ok(why.includes('通常是为了先把要改的东西看清楚'), 'the why line is the read category text')
+  assert.ok(!why.includes('下一步可能'), 'but still no next line')
+
+  assert.ok(plan.includes('为什么这样做'), 'the third level keeps the action and the why')
+  assert.ok(plan.includes('下一步可能'), 'and adds what comes next')
+  assert.ok(plan.includes('下一步多半是继续读相关文件'), 'the next line is the read category text')
+  assert.ok(plan.length > why.length && why.length > now.length, 'each level is longer than the one below it')
+
+  // The three levels must not all say the same thing.
+  assert.equal(new Set([now, why, plan]).size, 3, 'every study level reads differently')
+
+  // A dangerous command gets the danger wording at the same levels, not the calm one.
+  built.__test.setStudy('plan')
+  const danger = textOf(
+    render(
+      built.__test.ApprovalDetail,
+      { callId: 'c5' },
+      snapshotOf([{ kind: 'tool-call', data: { root: { phase: 'start', callId: 'c5', name: 'pwsh', argsRaw: '{"command":"Remove-Item -Recurse .\\\\out"}' } } }]),
+    ),
+  )
+  assert.ok(danger.includes('这条命令会删除或覆盖数据'), 'a dangerous command gets the danger why')
+  assert.ok(danger.includes('取决于你答不答应'), 'and the danger next line')
+  assert.ok(!danger.includes('通常是为了验证、构建或运行'), 'not the calm exec wording')
+
+  // An unknown stored value falls back to the first level instead of crashing.
+  built.__test.setStudy('nonsense')
+  assert.equal(built.__test.readStudy(), 'now', 'an unreadable study level falls back to the first one')
+  built.__test.setStudy('now')
+}
+
 // --- settings row ----------------------------------------------------
 // The choice lives in the profile, not in this browser: the row reads it from
 // the Host and writes it back through the same route the shipped page uses.
@@ -426,19 +514,26 @@ const pageText = textOf(page)
 assert.ok(pageText.includes('步骤说明'), 'the page has a title')
 assert.ok(pageText.includes('说明的详细程度'), 'the page groups the explanation setting')
 assert.ok(pageText.includes('审批框的说明档位'), 'the page names the level setting')
+assert.ok(pageText.includes('行为学习等级'), 'the page names the study level setting')
 for (const level of ['基础', '模型补充', '完整说明']) {
   // The row title supplies the "详细程度" prefix; each button carries only the
   // level name, so three buttons still fit the right-hand column.
   assert.ok(pageText.includes(level), `the page offers the "${level}" level`)
 }
 assert.ok(!pageText.includes('详细程度：基础'), 'the button does not repeat the row title prefix')
+// Two three-level groups now: the approval dialog's detail and the study level.
+// They are separate settings, so each keeps its own set of three buttons.
 const levelButtons = controlsOf(page).filter((node) => node.type === 'button')
-assert.equal(levelButtons.length, 3, 'the page shows all three levels at once')
-assert.deepEqual(levelButtons.map((node) => textOf(node)), ['基础', '模型补充', '完整说明'], 'each button is labelled with its level only')
+assert.equal(levelButtons.length, 6, 'the page shows both three-level groups at once')
+assert.deepEqual(
+  levelButtons.map((node) => textOf(node)),
+  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步'],
+  'each button is labelled with its level only',
+)
 assert.deepEqual(
   levelButtons.map((node) => node.props['aria-pressed']),
-  [true, false, false],
-  'the current level is the one marked pressed, and only that one',
+  [true, false, false, true, false, false],
+  'each group marks its own current level, and only that one',
 )
 // The level control must be reachable: the row that holds it lets the group
 // wrap and grow rather than clipping it out of the scroll column.
@@ -541,16 +636,26 @@ assert.ok(
   }
   const pressed = (tree) => controlsOf(tree).filter((node) => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf)
 
-  assert.deepEqual(pressed(draw()), ['基础'], 'the page opens on the basic level')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'the page opens on the first level of each group')
   press(draw(), '完整说明')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'full', 'the click is stored')
-  assert.deepEqual(pressed(draw()), ['完整说明'], 'and the re-rendered page shows it as current')
+  assert.deepEqual(pressed(draw()), ['完整说明', '做什么'], 'and the re-rendered page shows it as current')
   press(draw(), '模型补充')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'model', 'another level is picked the same way')
-  assert.deepEqual(pressed(draw()), ['模型补充'], 'the page follows the new pick')
+  assert.deepEqual(pressed(draw()), ['模型补充', '做什么'], 'the page follows the new pick')
   // Back to basic, so the rest of the file starts where it expects to.
   press(draw(), '基础')
-  assert.deepEqual(pressed(draw()), ['基础'], 'and it can go back')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'and it can go back')
+
+  // The study level is its own setting: it moves without touching the detail one.
+  press(draw(), '下一步')
+  assert.equal(liveStore.get('dsh-step-explain/study'), 'plan', 'the study pick is stored separately')
+  assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'each group keeps its own current level')
+  press(draw(), '为什么')
+  assert.deepEqual(pressed(draw()), ['基础', '为什么'], 'the study group follows its own pick')
+  press(draw(), '做什么')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'and it returns to the first level')
 
   React.useState = realUseState
   React.useEffect = realUseEffect

@@ -85,19 +85,30 @@ The **Full** level is for "first time seeing this, I want to understand before d
 
 ## What the explanation contains
 
-Each step gives three kinds of information:
+Each step names what is happening, then adds how much of the *behaviour* you asked to learn. That is the **study level**, a setting of its own:
 
-- **What this step does** — for example "Runs a command on this machine, with no limit on what it can do."
+| Study level | What the step shows |
+| --- | --- |
+| **What** (default) | What this step is doing, in plain words. |
+| **Why** | The same, plus what this kind of step is usually for. |
+| **Next** | The same, plus what commonly comes next, so you can follow its rhythm. |
+
+Under those, every step always gives:
+
 - **Impact** — for example "The command really runs: it may change files, install software or go online."
 - **Whether it can be undone** — for example "It depends on the command; read what it does before deciding."
 
 Plus a **risk level** (Low / Caution / Touches data) and **what it is operating on** (a file name, a command, a URL, a search term).
+
+The "why" and "next" lines describe **the kind of step**, never this model's private motive — the wording says "usually" and "most likely" on purpose. A dangerous command gets its own pair of lines instead of the calm ones.
 
 The approval dialog additionally gives:
 
 ```
 Run a PowerShell command                              Caution
 Runs a command on this machine, with no limit on what it can do.
+Why this step: Usually to verify, build or run, confirming the result from real output instead of assuming it.
+Likely next: Most likely it reads the output and decides: carry on if it passes, come back and fix it if not.
   npm test
 Allow: the command really runs, and may change files on disk.
 Reject: the command does not run, and nothing happens.
@@ -105,6 +116,17 @@ This is an explanation only; it does not choose for you.
 ```
 
 The warning line is missing above because `npm test` does not look destructive. Recursive delete, force push, `DROP TABLE`, piped-into-shell and the like add a red line under the command.
+
+## The study level (how much it teaches you)
+
+**Settings → Step Explain → How much it teaches** has three buttons: **What / Why / Next**. They stack — Next includes Why, and Why includes What — so picking a higher level never loses the line you already had.
+
+- **What** names the action only. This is the default, and the quietest.
+- **Why** adds what this kind of operation is normally for: reading to see before changing, writing to make a worked-out change take effect, running to confirm from real output, and so on.
+- **Next** adds what commonly follows: read → more reading or a change, write → a test or command, command → read the output and decide, question → wait for your answer.
+
+Everything on all three levels is local rule text. **No level sends anything anywhere**; the study level is independent of the Model notes level, which is the only one that goes online.
+
 
 ## The Model notes level (optional, uses a model)
 
