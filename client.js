@@ -395,11 +395,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Request body for the Host: the call and the answer language. The model is
-     * not sent — the Host reads the saved choice from the profile itself.
+     * Request body for the Host: the call, the answer language and how much to
+     * explain. The model is not sent — the Host reads the saved choice from the
+     * profile itself.
      */
-    function detailPayload(call, lang) {
-      return { name: call.name, argsRaw: call.argsRaw, lang }
+    function detailPayload(call, lang, study) {
+      return { name: call.name, argsRaw: call.argsRaw, lang, study }
     }
 
     /** Active language for the model prompt; `apply` binds this to the locale service. */
@@ -453,12 +454,12 @@ window.__ModuleLoader__.load({
 
 
     /** One explanation for this call, or `''` for every kind of failure. */
-    async function fetchDetail(call, lang, signal) {
+    async function fetchDetail(call, lang, signal, study) {
       try {
         const response = await fetch(DETAIL_ROUTE, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(detailPayload(call, lang)),
+          body: JSON.stringify(detailPayload(call, lang, study)),
           signal,
         })
         return response.ok ? pickDetail(await response.json()) : ''
@@ -507,10 +508,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Model paragraph for one call: `undefined` while asking, `''` when the
-     * Host could not answer, and the text once it does.
+     * Model explanation for one call: `undefined` while asking, `''` when the
+     * Host could not answer, and the text once it does. `study` rides along so
+     * the Host can ask for the same depth the rule text would have shown.
      */
-    function useModelDetail(call, enabled, lang) {
+    function useModelDetail(call, enabled, lang, study) {
       const [text, setText] = React.useState(undefined)
       const name = enabled ? call.name : ''
       const argsRaw = enabled ? call.argsRaw : ''
@@ -519,14 +521,14 @@ window.__ModuleLoader__.load({
         if (name === '') return undefined
         const controller = new AbortController()
         let live = true
-        void fetchDetail({ name, argsRaw }, lang, controller.signal).then((detail) => {
+        void fetchDetail({ name, argsRaw }, lang, controller.signal, study).then((detail) => {
           if (live) setText(detail)
         })
         return () => {
           live = false
           controller.abort()
         }
-      }, [name, argsRaw, lang])
+      }, [name, argsRaw, lang, study])
       return text
     }
 
@@ -803,29 +805,47 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The explanation lines shared by every surface, at the reader's study
-     * level: the action is always named, `why` adds what it is usually for, and
-     * `plan` adds what commonly comes next. The effect and undo lines follow.
+     * The explanation lines shared by every surface.
      *
-     * When the model switch is on, one model-written line is appended per call.
-     * It is additive: the rule text above is what the reader always gets, so a
-     * failed or slow request only means that extra line does not appear.
+     * With the model switch off, all of it comes from local rules: the action is
+     * always named, `why` adds what it is usually for, and `plan` adds what
+     * commonly comes next.
+     *
+     * With it on, the model writes the explanation at the same study level and
+     * its text replaces those rule lines. The impact and undo lines stay local
+     * either way, because they are the facts the reader decides on — a model
+     * that times out or is unconfigured must never leave the reader without
+     * them. While the answer is in flight the rule lines are shown, so the panel
+     * is never empty and the reader is never kept waiting on a blank.
      */
     function Detail({ info, t }) {
       const level = useStudyLevel()
       const byModel = useExplainByModel()
       const parts = studyParts(level)
-      const model = useModelDetail({ name: info.tool, argsRaw: info.argsRaw }, byModel && info.tool !== '', langNow())
+      const asked = byModel && info.tool !== ''
+      const model = useModelDetail({ name: info.tool, argsRaw: info.argsRaw }, asked, langNow(), level)
+      // Replace only once an answer actually arrived; `''` means it never will.
+      const byModelText = asked && typeof model === 'string' && model !== ''
       return h(
         'div',
         { className: 'dse-body' },
-        h('div', { className: 'dse-line' }, t('step.line', { now: info.now })),
-        parts.includes('why') && h('div', { className: 'dse-line' }, t('why.line', { why: info.why })),
-        parts.includes('plan') && h('div', { className: 'dse-line' }, t('next.line', { next: info.next })),
+        byModelText
+          ? h('div', { className: 'dse-line' }, model)
+          : h(
+              'div',
+              {},
+              h('div', { className: 'dse-line' }, t('step.line', { now: info.now })),
+              parts.includes('why') && h('div', { className: 'dse-line' }, t('why.line', { why: info.why })),
+              parts.includes('plan') && h('div', { className: 'dse-line' }, t('next.line', { next: info.next })),
+            ),
+        // The waiting line sits under the rule text, so it reads as "more is
+        // coming" rather than as the whole explanation.
+        asked && model === undefined && h('div', { className: 'dse-muted' }, t('detail.waiting')),
         h('div', { className: 'dse-line' }, t('effect.line', { effect: info.effect })),
         h('div', { className: 'dse-line' }, t('undo.line', { undo: info.undo })),
-        // The model line is labelled, so it is never mistaken for rule text.
-        byModel && model !== '' && h('div', { className: model === undefined ? 'dse-muted' : 'dse-line' }, model ?? t('detail.waiting')),
+        // Says which of the two wrote the explanation above, so a model line is
+        // never mistaken for a rule.
+        asked && byModelText && h('div', { className: 'dse-foot' }, t('detail.byModel')),
       )
     }
 
@@ -1231,6 +1251,7 @@ window.__ModuleLoader__.load({
       'detail.full': '详细程度：完整说明',
       'detail.levelAria': '当前{level}，点一下切到{next}',
       'detail.waiting': '正在让模型补充这一档的说明…',
+      'detail.byModel': '以上解释由模型生成，可能出错；影响与撤回两行始终来自本地规则。',
       'full.purpose.title': '这个框是干什么的',
       'full.purpose': '模型想动你的文件或运行命令，但它自己不能决定，所以停下来问你。它只是请求，还没有执行；你不点，它就一直等着。',
       'full.trigger.title': '为什么会弹出来',
@@ -1254,8 +1275,8 @@ window.__ModuleLoader__.load({
       'page.level.title': '审批框的说明档位',
       'page.level.body': '基础档只讲规则，不联网；模型补充档再多一段模型写的说明；完整说明档把审批框本身拆成五段讲清楚。只改说明文字，不改审批流程。',
       'page.section.model': '模型',
-      'page.modelExplain.title': '让当前模型解释每一步',
-      'page.modelExplain.body': '开启后，聊天里每一步的展开说明、每轮汇总和审批框都会多一行由当前模型写的话。关闭时全部由本机规则生成，不联网。',
+      'page.modelExplain.title': '由当前模型生成每一步的解释',
+      'page.modelExplain.body': '开启后，聊天里每一步的展开说明、每轮汇总和审批框的解释文字都由当前模型生成（按你选的行为学习等级）；关闭时全部由本机规则生成，不联网。影响与撤回两行始终来自本地规则。',
       'page.modelExplain.on': '开启',
       'page.modelExplain.off': '关闭',
       'page.modelExplain.cost': '⚠ 会增加 token 消耗：开启后，每个工具调用都会单独发一次请求（工具名 + 参数原文 + 一句回答，上限 200 token），一轮里有 10 步就是 10 次。这些消耗计入你当前的模型额度，和聊天本身分开计算。看不清收益时建议先关着，只在审批框里用「模型补充」档。',
@@ -1391,6 +1412,7 @@ window.__ModuleLoader__.load({
       'detail.full': 'Detail: full',
       'detail.levelAria': 'Current level: {level}. Click for {next}.',
       'detail.waiting': 'Asking the model for this level’s note…',
+      'detail.byModel': 'The explanation above was written by a model and may be wrong; the impact and reversible lines always come from local rules.',
       'full.purpose.title': 'What this box is',
       'full.purpose': 'The model wants to touch your files or run a command, and it cannot decide that alone, so it stops and asks you. Nothing has happened yet; until you answer, it waits.',
       'full.trigger.title': 'Why it appeared',
@@ -1414,8 +1436,8 @@ window.__ModuleLoader__.load({
       'page.level.title': 'Detail level of the approval box',
       'page.level.body': 'Basic is rule text only and never goes online. Model notes adds one model-written paragraph. Full spells out the approval box itself in five parts. All three change the words only, never the approval flow.',
       'page.section.model': 'Model',
-      'page.modelExplain.title': 'Let the current model explain each step',
-      'page.modelExplain.body': 'When on, every expanded step, every turn summary and the approval dialog gain one line written by the current model. When off, everything is generated locally with no network call.',
+      'page.modelExplain.title': 'Have the current model write each step’s explanation',
+      'page.modelExplain.body': 'When on, the explanation for every expanded step, every turn summary and the approval dialog is written by the current model at the study level you picked. When off, everything comes from local rules with no network call. The impact and reversible lines always come from local rules.',
       'page.modelExplain.on': 'On',
       'page.modelExplain.off': 'Off',
       'page.modelExplain.cost': '⚠ This costs tokens: with it on, every tool call sends its own request (tool name + raw arguments + one short answer, capped at 200 tokens), so a ten-step turn is ten requests. That spend counts against your current model quota and is billed separately from the chat itself. Leave it off unless the extra line earns its cost, or use the Model notes level in the approval dialog instead.',

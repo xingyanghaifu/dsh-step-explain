@@ -34,6 +34,23 @@ const SYSTEM = {
   zh: '你在给新手解释电脑操作。用一到两句话说明这一步在做什么、会改动什么。不要用 Markdown，不要复述参数原文，不要评价好坏，不要给建议。',
   en: 'You explain computer actions to beginners. In one or two sentences say what this step does and what it changes. No Markdown, do not restate the arguments, do not judge, do not advise.',
 }
+
+/**
+ * Extra instruction per study level, so a model-written explanation carries the
+ * same parts the rule text does. `now` keeps the plain one-liner above; an
+ * unknown level falls back to it rather than asking for something undefined.
+ */
+const STUDY = {
+  now: { zh: '', en: '' },
+  why: {
+    zh: '再补一句这类操作通常是为了什么，措辞用「通常」，不要猜测这个模型的具体意图。',
+    en: 'Add one sentence on what this kind of operation is usually for, phrased with "usually"; never guess this particular model\'s motive.',
+  },
+  plan: {
+    zh: '再补一句这类操作通常是为了什么，最后再说一句下一步通常会发生什么。都用「通常」「多半」这类措辞，不要猜测这个模型的具体意图。',
+    en: 'Add one sentence on what this kind of operation is usually for, then one on what commonly comes next. Use "usually" and "most likely"; never guess this particular model\'s motive.',
+  },
+}
 /**
  * Rewriting is a different job: keep the author's intent, add only what the
  * request leaves implicit, and never invent facts, files or requirements.
@@ -104,14 +121,17 @@ function routeOf(value) {
  */
 export function parseInput(body) {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined
-  const { name, argsRaw, lang, model } = body
+  const { name, argsRaw, lang, model, study } = body
   if (typeof name !== 'string' || name.trim() === '') return undefined
   if (argsRaw !== undefined && typeof argsRaw !== 'string') return undefined
   if (model !== undefined && routeOf(model) === undefined) return undefined
+  if (study !== undefined && (typeof study !== 'string' || STUDY[study] === undefined)) return undefined
   return {
     name: name.slice(0, MAX_ID_CHARS),
     argsRaw: (argsRaw ?? '').slice(0, MAX_ARGS_CHARS),
     lang: typeof lang === 'string' && lang.startsWith('zh') ? 'zh' : 'en',
+    // The study level shapes the prompt; an absent one keeps the short answer.
+    study: study ?? 'now',
     ...(model === undefined ? {} : { model: routeOf(model) }),
   }
 }
@@ -220,7 +240,8 @@ async function ask(ctx, input, route, signal) {
   const selected = selectModel(ctx, input, savedRoute(ctx) ?? route)
   if (selected === undefined) return ''
   const call = await ctx.llm.prepareCall(
-    { provider: selected.provider, model: selected.model, maxTokens: 200 },
+    // Room for the study lines too; `now` still answers in a sentence or two.
+    { provider: selected.provider, model: selected.model, maxTokens: input.study === 'now' ? 200 : 320 },
     signal,
   )
   const messages = [
@@ -229,8 +250,12 @@ async function ask(ctx, input, route, signal) {
       content: [{ type: 'text', text: `Tool: ${input.name}\nArguments: ${input.argsRaw === '' ? '(none)' : input.argsRaw}` }],
     },
   ]
+  // The level's extra sentence is appended to the same system prompt, so one
+  // request still produces the whole explanation at that level.
+  const extra = STUDY[input.study]?.[input.lang] ?? ''
+  const system = extra === '' ? SYSTEM[input.lang] : `${SYSTEM[input.lang]}\n${extra}`
   let text = ''
-  for await (const chunk of call.stream({ ...call.config, messages, system: SYSTEM[input.lang], signal })) {
+  for await (const chunk of call.stream({ ...call.config, messages, system, signal })) {
     if (chunk.type === 'text-delta') text += chunk.text
   }
   return text

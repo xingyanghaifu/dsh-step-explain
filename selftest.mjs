@@ -231,9 +231,14 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
   const info = built.__test.explain('read', '{"file_path":"a.ts"}', t)
   built.__test.setExplain(false)
   cells = []
-  draw()
+  const off = textOf(draw())
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(asked.length, 0, 'with the switch off, no step asks any model')
+  // Off means the local rules are the whole explanation: no model text, no
+  // "a model wrote this" label, and no waiting line either.
+  assert.ok(off.includes('当前在做什么'), 'off: the local rule explanation is what the reader sees')
+  assert.ok(!off.includes('以上解释由模型生成'), 'off: nothing claims a model wrote it')
+  assert.ok(!off.includes('正在让模型补充'), 'off: no waiting line, because nothing is being asked')
 
   built.__test.setExplain(true)
   cells = []
@@ -247,11 +252,17 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
     'carrying the same call the rule text explained, and nothing else',
   )
   assert.ok(
-    Object.keys(asked[0].body).every((key) => ['name', 'argsRaw', 'lang'].includes(key)),
+    Object.keys(asked[0].body).every((key) => ['name', 'argsRaw', 'lang', 'study'].includes(key)),
     'no session content leaves the browser',
   )
-  // The rule text is still there, so the model line is additive, not a replacement.
-  assert.ok(textOf(draw()).includes('当前在做什么'), 'the rule text stays when the model line is on')
+  assert.equal(asked[0].body.study, 'plan', 'the study level rides along, so the model writes at the same depth')
+  // Once the answer arrives it replaces the rule explanation, while the impact
+  // and undo lines — the facts the reader decides on — stay local.
+  const replaced = textOf(draw())
+  assert.ok(replaced.includes('模型写的一句说明'), 'the model text is what the reader sees')
+  assert.ok(!replaced.includes('当前在做什么'), 'and the rule explanation is replaced, not stacked under it')
+  assert.ok(replaced.includes('影响：') && replaced.includes('能否撤回：'), 'the local impact and undo lines survive')
+  assert.ok(replaced.includes('以上解释由模型生成'), 'and the text says a model wrote it')
 
   built.__test.setExplain(false)
   globalThis.fetch = realFetch
@@ -355,20 +366,20 @@ assert.ok(!writeApproval.includes('删除或覆盖数据'), 'a plain write gets 
 
 // --- optional model detail -------------------------------------------
 // The request is exactly what the Host validates: a tool name, its raw
-// arguments and the answer language, and nothing about the session.
-assert.deepEqual(detailPayload({ name: 'read', argsRaw: '{"file_path":"a"}' }, 'zh'), {
+// arguments, the answer language and the study level, and nothing about the session.
+assert.deepEqual(detailPayload({ name: 'read', argsRaw: '{"file_path":"a"}' }, 'zh', 'why'), {
   name: 'read',
   argsRaw: '{"file_path":"a"}',
   lang: 'zh',
+  study: 'why',
 })
-assert.deepEqual(detailPayload({ name: '', argsRaw: '' }, 'en'), { name: '', argsRaw: '', lang: 'en' })
+assert.deepEqual(detailPayload({ name: '', argsRaw: '' }, 'en', 'now'), { name: '', argsRaw: '', lang: 'en', study: 'now' })
 
 // The model is never in the request: the Host reads the saved profile itself.
-assert.deepEqual(detailPayload({ name: 'read', argsRaw: '{}' }, 'en', { provider: 'p', model: 'm' }), {
-  name: 'read',
-  argsRaw: '{}',
-  lang: 'en',
-})
+// Even handed a model pair by mistake, the payload carries only the call.
+const withModel = detailPayload({ name: 'read', argsRaw: '{}', model: { provider: 'p', model: 'm' } }, 'en', 'now')
+assert.deepEqual(withModel, { name: 'read', argsRaw: '{}', lang: 'en', study: 'now' })
+assert.ok(!('model' in withModel), 'the model choice never rides on the request')
 
 // Any response that is not a string detail explains nothing rather than throwing.
 assert.equal(pickDetail({ detail: '一句话' }), '一句话')

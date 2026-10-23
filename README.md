@@ -127,16 +127,18 @@ The warning line is missing above because `npm test` does not look destructive. 
 
 Everything on all three levels is local rule text. **No level sends anything anywhere**; the study level is independent of the model switch and the Model notes level, which are the two things that can go online.
 
-## Letting the current model explain each step (off by default)
+## Having the current model write each step's explanation (off by default)
 
-**Settings → Step Explain → Let the current model explain each step** turns the rule text into rule text *plus* one model-written line, on every surface: each expanded step, the turn summary, and the approval dialog. It is off by default.
+**Settings → Step Explain → Have the current model write each step's explanation** replaces the local rule text with text written by the current model, at the study level you picked. It is off by default.
 
-- **Off** — everything is generated on this machine. No request, no tokens, no network.
-- **On** — every tool call sends its own request to the current model (or the one picked above) and appends what comes back, labelled so it is never mistaken for rule text.
+- **Off** — every explanation is generated on this machine. No request, no tokens, no network.
+- **On** — every tool call sends its own request to the current model (or the one picked above) and the answer becomes the explanation for that step.
 
-**This costs tokens.** Each step is a separate request: the tool name, its raw arguments, and a short answer capped at 200 tokens. A ten-step turn is ten requests. That spend comes out of your current model quota and is billed separately from the chat itself. The settings page says so in a warning line under the switch.
+The impact and reversible lines always stay local, because they are the facts the reader decides on; a model that times out or is unconfigured can never leave you without them. While an answer is in flight the rule text is shown, so the panel is never blank.
 
-The rule text is never replaced — the model line is appended, so a slow, failed or unconfigured model simply means that one line does not appear and everything else still works.
+**This costs tokens.** Each step is a separate request: the tool name, its raw arguments, and a short answer (capped at 200 tokens for the shortest study level, 320 for the fuller ones). A ten-step turn is ten requests. That spend comes out of your current model quota and is billed separately from the chat itself. The settings page states this in a warning line under the switch.
+
+A model-written explanation carries a footer saying so, so it is never mistaken for the rule text.
 
 ## The Model notes level (optional, uses a model)
 

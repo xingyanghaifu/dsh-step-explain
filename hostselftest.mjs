@@ -8,8 +8,13 @@ assert.deepEqual(parseInput({ name: 'read', argsRaw: '{"file_path":"a"}' }), {
   name: 'read',
   argsRaw: '{"file_path":"a"}',
   lang: 'en',
+  study: 'now',
 })
 assert.deepEqual(parseInput({ name: 'read', argsRaw: 'x', lang: 'zh-CN' }).lang, 'zh')
+// The study level reaches the Host and is validated, so the prompt can follow it.
+assert.equal(parseInput({ name: 'read', argsRaw: 'x', study: 'plan' }).study, 'plan', 'a known level is kept')
+assert.equal(parseInput({ name: 'read', argsRaw: 'x', study: 'why' }).study, 'why')
+assert.equal(parseInput({ name: 'read', argsRaw: 'x', study: 'nonsense' }), undefined, 'an unknown level is refused')
 assert.deepEqual(parseInput({ name: 'read', lang: 'fr' }).lang, 'en', 'an unknown language falls back to English')
 assert.equal(parseInput({ name: 'read' }).argsRaw, '', 'missing arguments are an empty string')
 
@@ -159,6 +164,56 @@ assert.deepEqual(
   { provider: 'local', model: 'tiny' },
   'the configured model is used instead of the chat default',
 )
+
+// The study level shapes the prompt, so a model-written explanation carries the
+// same parts the rule text does. All three must differ, or the level is inert.
+{
+  const systems = []
+  const tokens = []
+  for (const study of ['now', 'why', 'plan']) {
+    let seen
+    pinnedCtx.llm.prepareCall = async (config) => {
+      tokens.push(config.maxTokens)
+      return {
+        config,
+        async *stream(request) {
+          seen = request
+          yield { type: 'text-delta', text: 'ok' }
+        },
+      }
+    }
+    await pinnedDetail.fetch(
+      new Request('http://host/api/step-explain.detail', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'read', argsRaw: '{}', lang: 'zh', study }),
+      }),
+    )
+    assert.ok(seen !== undefined, `the "${study}" level reaches the model`)
+    systems.push(seen.system)
+  }
+  assert.equal(new Set(systems).size, 3, 'each study level asks the model for a different explanation')
+  assert.ok(!systems[1].includes('下一步'), 'the why level does not ask for the next step')
+  assert.ok(systems[2].includes('下一步'), 'the plan level does')
+  assert.ok(tokens[2] >= tokens[0], 'a fuller level is not given less room than the shortest')
+  // An absent level behaves like the shortest one, so old callers keep working.
+  let plain
+  pinnedCtx.llm.prepareCall = async (config) => ({
+    config,
+    async *stream(request) {
+      plain = request
+      yield { type: 'text-delta', text: 'ok' }
+    },
+  })
+  await pinnedDetail.fetch(
+    new Request('http://host/api/step-explain.detail', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'read', argsRaw: '{}', lang: 'zh' }),
+    }),
+  )
+  assert.equal(plain.system, systems[0], 'no level means the plain one-liner prompt')
+}
 
 // A half-configured route falls back to the chat default instead of failing.
 const half = []
