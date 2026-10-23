@@ -89,9 +89,9 @@ Each step names what is happening, then adds how much of the *behaviour* you ask
 
 | Study level | What the step shows |
 | --- | --- |
-| **What** (default) | What this step is doing, in plain words. |
+| **What** | What this step is doing, in plain words. |
 | **Why** | The same, plus what this kind of step is usually for. |
-| **Next** | The same, plus what commonly comes next, so you can follow its rhythm. |
+| **Next** (default) | The same, plus what commonly comes next, so you can follow its rhythm. |
 
 Under those, every step always gives:
 
@@ -121,7 +121,7 @@ The warning line is missing above because `npm test` does not look destructive. 
 
 **Settings → Step Explain → How much it teaches** has three buttons: **What / Why / Next**. They stack — Next includes Why, and Why includes What — so picking a higher level never loses the line you already had.
 
-- **What** names the action only. This is the default, and the quietest.
+- **What** names the action only. The quietest of the three.
 - **Why** adds what this kind of operation is normally for: reading to see before changing, writing to make a worked-out change take effect, running to confirm from real output, and so on.
 - **Next** adds what commonly follows: read → more reading or a change, write → a test or command, command → read the output and decide, question → wait for your answer.
 

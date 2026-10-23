@@ -346,23 +346,28 @@ window.__ModuleLoader__.load({
       return LEVELS[(LEVELS.indexOf(level) + 1) % LEVELS.length]
     }
 
-    /** Saved study level; anything unreadable means only the action is named. */
+    /**
+     * Saved study level. The default is the fullest one: the whole point of the
+     * plugin is to say what a step is for and what follows, and a reader who
+     * wants less can turn it down. An unreadable value falls back to that.
+     */
+    const STUDY_DEFAULT = 'plan'
     let studyLevel = readStudy()
     const studyListeners = new Set()
 
-    /** Read the stored study level; a blocked read means `now`. */
+    /** Read the stored study level; a blocked read means the default. */
     function readStudy() {
       try {
         const raw = globalThis.localStorage?.getItem(STUDY_KEY)
-        return STUDY_LEVELS.includes(raw) ? raw : 'now'
+        return STUDY_LEVELS.includes(raw) ? raw : STUDY_DEFAULT
       } catch {
-        return 'now'
+        return STUDY_DEFAULT
       }
     }
 
     /** Store the study level for every surface; a blocked write only loses it. */
     function setStudy(next) {
-      studyLevel = STUDY_LEVELS.includes(next) ? next : 'now'
+      studyLevel = STUDY_LEVELS.includes(next) ? next : STUDY_DEFAULT
       try {
         globalThis.localStorage?.setItem(STUDY_KEY, studyLevel)
       } catch {

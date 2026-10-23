@@ -192,7 +192,8 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
   const atPlan = expanded('plan')
   assert.ok(atPlan.includes('下一步可能'), 'the third level adds the next line')
   assert.ok(atPlan.length > atWhy.length && atWhy.length > atNow.length, 'and each level is longer than the last')
-  built.__test.setStudy('now')
+  // Back to the shipped default, so later blocks see what a new reader would.
+  built.__test.setStudy('plan')
 }
 
 // The approval cell explains the correlated call and names both outcomes.
@@ -208,11 +209,11 @@ assert.ok(approvalText.includes('点“允许”') && approvalText.includes('点
 assert.ok(approvalText.includes('删除或覆盖数据'), 'dangerous command gets the warning line')
 assert.ok(!approvalText.includes('影响：'), 'approval does not repeat the generic lines')
 assert.ok(approvalText.includes('详细程度：基础'), 'the level button starts at the basic level')
-// Study level: the default names the action and nothing more, so the reader is
-// not handed a "why" they did not ask for.
+// Study level: the default is the fullest one, because the plugin exists to say
+// what a step is for and what follows. Turning it down is the opt-in.
 assert.ok(approvalText.includes('当前在做什么'), 'the approval names the current action')
-assert.ok(!approvalText.includes('为什么这样做'), 'the default study level adds no why line')
-assert.ok(!approvalText.includes('下一步可能'), 'and no next line either')
+assert.ok(approvalText.includes('为什么这样做'), 'the default study level explains why')
+assert.ok(approvalText.includes('下一步可能'), 'and what commonly comes next')
 // The cell may own a toggle, but never an answer: the shipped dialog decides.
 // Its Enter handler skips `button`, and every control here is type="button".
 const controlsOf = (node) =>
@@ -432,10 +433,10 @@ built.__test.setDetail('rule')
   assert.ok(danger.includes('取决于你答不答应'), 'and the danger next line')
   assert.ok(!danger.includes('通常是为了验证、构建或运行'), 'not the calm exec wording')
 
-  // An unknown stored value falls back to the first level instead of crashing.
+  // An unknown stored value falls back to the default instead of crashing.
   built.__test.setStudy('nonsense')
-  assert.equal(built.__test.readStudy(), 'now', 'an unreadable study level falls back to the first one')
-  built.__test.setStudy('now')
+  assert.equal(built.__test.readStudy(), 'plan', 'an unreadable study level falls back to the default')
+  built.__test.setStudy('plan')
 }
 
 // --- settings row ----------------------------------------------------
@@ -532,8 +533,8 @@ assert.deepEqual(
 )
 assert.deepEqual(
   levelButtons.map((node) => node.props['aria-pressed']),
-  [true, false, false, true, false, false],
-  'each group marks its own current level, and only that one',
+  [true, false, false, false, false, true],
+  'each group marks its own current level: Basic for the dialog, the fullest for study',
 )
 // The level control must be reachable: the row that holds it lets the group
 // wrap and grow rather than clipping it out of the scroll column.
@@ -636,26 +637,26 @@ assert.ok(
   }
   const pressed = (tree) => controlsOf(tree).filter((node) => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf)
 
-  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'the page opens on the first level of each group')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'the page opens on each group’s own default')
   press(draw(), '完整说明')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'full', 'the click is stored')
-  assert.deepEqual(pressed(draw()), ['完整说明', '做什么'], 'and the re-rendered page shows it as current')
+  assert.deepEqual(pressed(draw()), ['完整说明', '下一步'], 'and the re-rendered page shows it as current')
   press(draw(), '模型补充')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'model', 'another level is picked the same way')
-  assert.deepEqual(pressed(draw()), ['模型补充', '做什么'], 'the page follows the new pick')
+  assert.deepEqual(pressed(draw()), ['模型补充', '下一步'], 'the page follows the new pick')
   // Back to basic, so the rest of the file starts where it expects to.
   press(draw(), '基础')
-  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'and it can go back')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'and it can go back')
 
   // The study level is its own setting: it moves without touching the detail one.
-  press(draw(), '下一步')
-  assert.equal(liveStore.get('dsh-step-explain/study'), 'plan', 'the study pick is stored separately')
-  assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'each group keeps its own current level')
   press(draw(), '为什么')
-  assert.deepEqual(pressed(draw()), ['基础', '为什么'], 'the study group follows its own pick')
+  assert.equal(liveStore.get('dsh-step-explain/study'), 'why', 'the study pick is stored separately')
+  assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
+  assert.deepEqual(pressed(draw()), ['基础', '为什么'], 'each group keeps its own current level')
   press(draw(), '做什么')
-  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'and it returns to the first level')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么'], 'the study group follows its own pick')
+  press(draw(), '下一步')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步'], 'and it returns to the default level')
 
   React.useState = realUseState
   React.useEffect = realUseEffect
