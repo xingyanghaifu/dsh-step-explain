@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# 介绍视频的工程与成片（约 13 GB 的帧序列），不进仓库
+video/

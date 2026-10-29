@@ -323,7 +323,12 @@ assert.ok(approvalText.includes('会动到数据'), 'approval states the risk le
 assert.ok(approvalText.includes('点“允许”') && approvalText.includes('点“拒绝”'), 'approval explains both answers')
 assert.ok(approvalText.includes('删除或覆盖数据'), 'dangerous command gets the warning line')
 assert.ok(!approvalText.includes('影响：'), 'approval does not repeat the generic lines')
-assert.ok(approvalText.includes('详细程度：基础'), 'the level button starts at the basic level')
+// All three levels are listed at once: a cycle button used to show only the
+// level you were already on, so the other two never became visible.
+assert.ok(
+  approvalText.includes('基础') && approvalText.includes('模型补充') && approvalText.includes('完整说明'),
+  'all three levels are visible in the dialog',
+)
 // Study level: the default is the fullest one, because the plugin exists to say
 // what a step is for and what follows. Turning it down is the opt-in.
 assert.ok(approvalText.includes('当前在做什么'), 'the approval names the current action')
@@ -411,6 +416,31 @@ assert.ok(approvalText.includes('下一步可能'), 'and what commonly comes nex
   for (const effect of pending2) effect()
   assert.ok(textOf(waiting).includes('正在让模型补充这一档的说明'), 'and its waiting text names that trigger')
 
+  // A failed model answer is stated, not silently dropped: the reader has to
+  // know the lines above are the rule text, and that reopening is a real retry.
+  built.__test.setDetail('rule')
+  built.__test.setExplain(true)
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({}) })
+  const failSnap = snapshotOf([
+    { kind: 'tool-call', data: { root: { phase: 'start', callId: 'c8', name: 'pwsh', argsRaw: '{"command":"npm run deploy"}' } } },
+  ])
+  const drawFail = (fresh) => {
+    if (fresh) cells = []
+    cursor = 0
+    queued = []
+    const tree = mount(built.__test.ApprovalDetail({ callId: 'c8', useChat: (select) => select(failSnap), t }))
+    const effects = queued
+    queued = []
+    for (const effect of effects) effect()
+    return tree
+  }
+  drawFail(true)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(
+    textOf(drawFail(false)).includes('模型这次没答上来'),
+    'a failed model answer says so instead of leaving the waiting line to vanish',
+  )
+
   built.__test.setDetail('rule')
   built.__test.setExplain(false)
   globalThis.fetch = realFetch
@@ -428,8 +458,8 @@ const controlsOf = (node) =>
 const controls = controlsOf(approval).filter((node) => typeof node.type === 'string' && /^(button|input|form|select|textarea)$/.test(node.type))
 assert.deepEqual(
   controls.map((node) => [node.type, node.props.type]),
-  [['button', 'button']],
-  'the approval cell renders only the explanation toggle, and it is never a submit',
+  [['button', 'button'], ['button', 'button'], ['button', 'button']],
+  'the approval cell renders only its three level buttons, and none is ever a submit',
 )
 
 // The risk level must survive for a screen reader wherever no text states it.
@@ -439,12 +469,14 @@ const ariaLabels = (node) =>
     : Array.isArray(node)
       ? node.flatMap(ariaLabels)
       : [node.props?.['aria-label'], ...ariaLabels(node.children)].filter(Boolean)
-assert.ok(ariaLabels(live).includes('低风险'), 'the dock dot names its risk level')
-// The level button says where the click leads, so a screen-reader user is not
-// offered a bare "click to change" with no destination.
+// The risk word is now printed next to the dot, so it survives greyscale and
+// colour blindness instead of living only in an aria-label.
+assert.ok(textOf(live).includes('低风险'), 'the dock prints the risk level beside the dot')
+// The three level buttons are a labelled group, so a screen reader hears what
+// the three buttons are for.
 assert.ok(
-  ariaLabels(approval).some((label) => label.includes('点一下切到详细程度：模型补充')),
-  'the level button names the next level, not just the current one',
+  ariaLabels(approval).includes('审批框里说多细'),
+  'the level group is named',
 )
 assert.deepEqual(
   (() => {
@@ -521,9 +553,6 @@ assert.equal(pickDetail('text'), '')
 // Three levels, basic until the reader changes it, and storage failure is not fatal.
 assert.equal(built.__test.readDetail(), 'rule')
 assert.deepEqual(built.__test.LEVELS, ['rule', 'model', 'full'], 'three levels, in increasing detail')
-assert.equal(built.__test.nextDetail('rule'), 'model', 'basic goes to the model notes')
-assert.equal(built.__test.nextDetail('model'), 'full', 'the model notes go to the full explanation')
-assert.equal(built.__test.nextDetail('full'), 'rule', 'and the cycle comes back to basic')
 const store = new Map()
 globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) }
 built.__test.setDetail('model')
@@ -570,10 +599,15 @@ for (const heading of ['这个框是干什么的', '为什么会弹出来', '框
 assert.ok(fullApproval.length > offApproval.length * 2, 'the full level is substantially longer than the basic one')
 assert.ok(fullApproval.includes('允许') && fullApproval.includes('拒绝'), 'the full level names both answers')
 assert.ok(fullApproval.includes('读取文件'), 'the full level reuses the real effect of this call')
-assert.ok(fullApproval.includes('详细程度：完整说明'), 'the button shows the full level as current')
+{
+  const levels = controlsOf(fullNode).filter(
+    (node) => node.type === 'button' && ['基础', '模型补充', '完整说明'].includes(textOf(node).trim()),
+  )
+  assert.deepEqual(levels.map((node) => node.props['aria-pressed']), [false, false, true], 'the full level reads as current')
+}
 // Only the level button — no allow/reject control ever comes from this cell.
 const fullControls = controlsOf(fullNode).filter((node) => typeof node.type === 'string' && /^(button|input|form|select|textarea)$/.test(node.type))
-assert.deepEqual(fullControls.map((node) => node.props.type), ['button'], 'the full level still adds no answer control')
+assert.deepEqual(fullControls.map((node) => node.props.type), ['button', 'button', 'button'], 'the cell renders only its three level buttons, never an answer control')
 
 // The model level adds the model paragraph on top of the rule text, not instead of it.
 built.__test.setDetail('model')
@@ -717,27 +751,31 @@ const pageText = textOf(page)
 }
 assert.ok(pageText.includes('步骤说明'), 'the page has a title')
 assert.ok(pageText.includes('说明的详细程度'), 'the page groups the explanation setting')
-assert.ok(pageText.includes('审批框的说明档位'), 'the page names the level setting')
-assert.ok(pageText.includes('行为学习等级'), 'the page names the study level setting')
+assert.ok(pageText.includes('审批框里说多细'), 'the page names the level setting')
+assert.ok(pageText.includes('讲解深度'), 'the page names the study level setting')
 for (const level of ['基础', '模型补充', '完整说明']) {
   // The row title supplies the "详细程度" prefix; each button carries only the
   // level name, so three buttons still fit the right-hand column.
   assert.ok(pageText.includes(level), `the page offers the "${level}" level`)
 }
 assert.ok(!pageText.includes('详细程度：基础'), 'the button does not repeat the row title prefix')
-// Two three-level groups now: the approval dialog's detail and the study level.
+// Two three-level groups: the approval dialog's detail and the study level.
 // They are separate settings, so each keeps its own set of three buttons.
+// The context row is now three modes as well, and the model switch is the only
+// on/off pair left.
 const levelButtons = controlsOf(page).filter((node) => node.type === 'button')
-assert.equal(levelButtons.length, 10, 'the page shows both three-level groups and the two on/off pairs')
+assert.equal(levelButtons.length, 11, 'the page shows three three-level groups, one on/off pair and the docs toggle')
 assert.deepEqual(
   levelButtons.map((node) => textOf(node)),
-  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步', '关闭', '开启', '关闭', '开启'],
+  ['基础', '模型补充', '完整说明', '做什么', '为什么', '下一步', '关闭', '开启', '不读', '挑选聊天内容', '展开说明'],
   'each button is labelled with its level only',
 )
 assert.deepEqual(
+  // The docs entry is a disclosure, so it carries aria-expanded rather than
+  // aria-pressed; `undefined` there is correct, not a missing state.
   levelButtons.map((node) => node.props['aria-pressed']),
-  [true, false, false, false, false, true, true, false, true, false],
-  'each group marks its own current level: Basic for the dialog, the fullest for study, both switches off',
+  [true, false, false, false, false, true, true, false, true, false, undefined],
+  'each group marks its own current level: Basic for the dialog, the fullest for study, model off, context off',
 )
 // The level control must be reachable: the row that holds it lets the group
 // wrap and grow rather than clipping it out of the scroll column.
@@ -760,7 +798,14 @@ assert.equal(pageStore.get('dsh-step-explain/detail'), 'model', 'and it lands in
 built.__test.setDetail('rule')
 delete globalThis.localStorage
 // The page explains its own privacy boundary rather than leaving it implied.
-assert.ok(pageText.includes('只有「模型补充」档'), 'the page says which level goes online')
+assert.ok(
+  pageText.includes('关闭「由当前模型生成每一步的解释」时，只有模型补充档会上网'),
+  'the page says exactly which levels go online',
+)
+assert.ok(
+  pageText.includes('打开后，任何一档都会把工具名和参数原文发给模型'),
+  'and that the model switch widens it to every level',
+)
 assert.ok(pageText.includes('不渲染允许/拒绝按钮'), 'the page repeats the read-only boundary')
 // It still owns no approval answer.
 const pageControls = controlsOf(page).filter((node) => /^(button|input|form|select|textarea)$/.test(node.type))
@@ -844,45 +889,60 @@ assert.ok(
   }
   const pressed = (tree) => controlsOf(tree).filter((node) => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf)
 
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'the page opens on each group’s own default')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'the page opens on each group’s own default')
   press(draw(), '完整说明')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'full', 'the click is stored')
-  assert.deepEqual(pressed(draw()), ['完整说明', '下一步', '关闭', '关闭'], 'and the re-rendered page shows it as current')
+  assert.deepEqual(pressed(draw()), ['完整说明', '下一步', '关闭', '不读'], 'and the re-rendered page shows it as current')
   press(draw(), '模型补充')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'model', 'another level is picked the same way')
-  assert.deepEqual(pressed(draw()), ['模型补充', '下一步', '关闭', '关闭'], 'the page follows the new pick')
+  assert.deepEqual(pressed(draw()), ['模型补充', '下一步', '关闭', '不读'], 'the page follows the new pick')
   // Back to basic, so the rest of the file starts where it expects to.
   press(draw(), '基础')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'and it can go back')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'and it can go back')
 
   // The study level is its own setting: it moves without touching the detail one.
   press(draw(), '为什么')
   assert.equal(liveStore.get('dsh-step-explain/study'), 'why', 'the study pick is stored separately')
   assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
-  assert.deepEqual(pressed(draw()), ['基础', '为什么', '关闭', '关闭'], 'each group keeps its own current level')
+  assert.deepEqual(pressed(draw()), ['基础', '为什么', '关闭', '不读'], 'each group keeps its own current level')
   press(draw(), '做什么')
-  assert.deepEqual(pressed(draw()), ['基础', '做什么', '关闭', '关闭'], 'the study group follows its own pick')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '关闭', '不读'], 'the study group follows its own pick')
   press(draw(), '下一步')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'and it returns to the default level')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'and it returns to the default level')
 
   // The model switch is a third, independent setting.
   press(draw(), '开启')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'on', 'turning the model on is stored')
   assert.equal(liveStore.get('dsh-step-explain/study'), 'plan', 'and leaves the study level alone')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '开启', '关闭'], 'the switch shows as on')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '开启', '不读'], 'the switch shows as on')
   press(draw(), '关闭')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and it can be turned off again')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'back to the cheap default')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'back to the cheap default')
 
-  // The context switch is the fourth setting, and it stores under its own key.
-  // It is the second on/off pair, so `nth` names it.
-  press(draw(), '开启', 1)
-  assert.equal(liveStore.get('dsh-step-explain/context'), 'on', 'the context switch is stored separately')
+  // The context setting is the fourth, and it stores under its own key. It is a
+  // two-mode choice: none, or the whole conversation with the reader picking.
+  press(draw(), '挑选聊天内容')
+  assert.equal(liveStore.get('dsh-step-explain/context'), 'full', 'the context mode is stored separately')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and leaves the model switch alone')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '开启'], 'only the context switch moved')
-  press(draw(), '关闭', 1)
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '挑选聊天内容'], 'only the context mode moved')
+  press(draw(), '不读')
   assert.equal(liveStore.get('dsh-step-explain/context'), 'off', 'and it can be turned off again')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '关闭'], 'both switches back off')
+  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'back to sending only the composer')
+
+  // The notes are a disclosure: closed until asked for, then it explains the
+  // parts that are not guessable from the labels (three modes, ticks, the cap).
+  const closedDocs = draw()
+  assert.ok(textOf(closedDocs).includes('功能说明'), 'the page names the notes section')
+  assert.ok(!textOf(closedDocs).includes('「读取对话」的两个选择'), 'closed by default: no prose dumped on the page')
+  assert.ok(!textOf(closedDocs).includes('内容发到哪里'), 'and none of the other notes either')
+  press(closedDocs, '展开说明')
+  const openDocs = draw()
+  for (const heading of ['「读取对话」的两个选择', '勾选决定发送范围', '字数上限', '内容发到哪里']) {
+    assert.ok(textOf(openDocs).includes(heading), `the notes explain "${heading}"`)
+  }
+  assert.ok(textOf(openDocs).includes('没勾的一律不发送'), 'the notes state the picking rule')
+  press(openDocs, '收起说明')
+  assert.ok(!textOf(draw()).includes('「读取对话」的两个选择'), 'and it closes again')
 
   React.useState = realUseState
   React.useEffect = realUseEffect
@@ -929,7 +989,7 @@ const drawBar = (draft) => {
     built.__test.RewriteBar({
       t,
       useInput: (select) => select({ draft }),
-      useChat: (select) => select({ legacy: { nodes: chatNodes } }),
+      useChat: (select) => select({ nodes: { values: () => chatNodes }, legacy: { nodes: chatNodes } }),
       inputActions,
     }),
   )
@@ -955,6 +1015,16 @@ const settleFresh = async (draft) => {
   return freshBar(draft)
 }
 const buttonNamed = (tree, label) => controlsOf(tree).find((node) => node.type === 'button' && textOf(node).trim() === label)
+/** Choose 挑选聊天内容; the list is inline, so one click is enough. */
+const expandBar = (draft) => {
+  const first = drawBar(draft)
+  const mode = controlsOf(first).find(
+    (node) => node.type === 'button' && textOf(node).trim() === '挑选聊天内容' && node.props['aria-pressed'] !== true,
+  )
+  if (mode === undefined) return first
+  mode.props.onClick()
+  return drawBar(draft)
+}
 
 // An empty draft offers nothing, and the bar is never a submit surface.
 assert.equal(drawBar(''), null, 'a quiet composer shows no rewrite offer')
@@ -1068,8 +1138,8 @@ hookState.length = 0
 hookRefs.length = 0
 {
   chatNodes = [
-    { kind: 'user', visibility: 'visible', data: { content: [{ type: 'text', text: '把那个 bug 修了' }] } },
-    { kind: 'assistant-step', visibility: 'visible', data: { content: [{ type: 'text', text: '修好了，是登录页的空指针。' }] } },
+    { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '把那个 bug 修了' }] } },
+    { kind: 'assistant-step', visibility: 'visible', data: { blocks: [{ kind: 'text', text: '修好了，是登录页的空指针。' }] } },
     { kind: 'tool-call', visibility: 'visible', data: { root: { name: 'read', argsRaw: '{"file_path":"secret.ts"}' } } },
   ]
   globalThis.fetch = async (url, init = {}) => {
@@ -1077,39 +1147,203 @@ hookRefs.length = 0
     return { ok: true, json: async () => ({ text: 'REWRITTEN' }) }
   }
 
-  // The switch is visible in the bar, and starts off.
+  // Two buttons only: 不读 and 挑选聊天内容. The second one *is* the picker, so
+  // there is no separate expander to find.
   const off = drawBar('把那个 bug 修了')
-  assert.ok(textOf(off).includes('读取对话：关'), 'the bar shows the switch, and it starts off')
-  assert.ok(textOf(off).includes('不读取对话内容'), 'and says what off means')
+  assert.ok(textOf(off).includes('读取对话'), 'the bar names the setting')
+  assert.ok(textOf(off).includes('不读'), 'and offers the first choice')
+  assert.ok(textOf(off).includes('挑选聊天内容'), 'and the second')
+  assert.ok(!textOf(off).includes('节选'), 'there is no preset window any more')
+  assert.ok(!textOf(off).includes('选择段落'), 'and no separate expander either')
+  assert.equal(controlsOf(off).find((node) => node.type === 'input' && node.props.type === 'checkbox'), undefined, 'on 不读 there is no message picker')
 
   posted.length = 0
   buttonNamed(drawBar('把那个 bug 修了'), '帮我扩写').props.onClick()
   await settleFresh('把那个 bug 修了')
-  assert.ok(!('context' in posted[0].body), 'off: the request carries no conversation')
+  assert.ok(!('context' in posted[0].body), 'none: the request carries no conversation')
 
-  // Turn it on from the bar: the next run must carry the conversation at once.
-  built.__test.setContext(true)
+  // Switch to the whole conversation from the bar: the next run must carry it
+  // at once, with the reader's ticks deciding what is inside.
+  built.__test.setContext('full')
   const on = freshBar('把那个 bug 修了')
-  assert.ok(textOf(on).includes('读取对话：开'), 'the bar shows the switch as on')
+  assert.ok(textOf(on).includes('已选'), '挑选聊天内容 shows the inline list with its count')
   posted.length = 0
   buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
   await settleFresh('把那个 bug 修了')
   const sent = posted[0].body
-  assert.equal(typeof sent.context, 'string', 'on: the request carries the conversation')
+  assert.equal(typeof sent.context, 'string', 'full: the request carries the conversation')
   assert.ok(sent.context.includes('把那个 bug 修了'), 'including what the reader said')
   assert.ok(sent.context.includes('修好了，是登录页的空指针。'), 'and what the assistant replied')
   assert.ok(!sent.context.includes('secret.ts'), 'but never tool arguments')
-  assert.ok(sent.context.length <= 4000, 'and never more than the cap')
+
+  // Expanding shows the explanation, the counts, the per-message picker and the
+  // payload itself.
+  built.__test.setContext('full')
+  // Remounted so the new mode is the initial state, then the drawer is opened.
+  const opened = expandBar('把那个 bug 修了')
+  assert.ok(textOf(opened).includes('默认全部勾选'), 'the picker explains its default')
+  assert.ok(textOf(opened).includes('已选'), 'expanded: the counts are shown')
+  assert.ok(textOf(opened).includes('未勾选的一律不发送'), 'expanded: the picker says unticked means unsent')
+  assert.ok(!textOf(opened).includes('偏长'), 'a short selection gets no long-context warning')
+  const boxes = controlsOf(opened).filter((node) => node.type === 'input' && node.props.type === 'checkbox')
+  assert.equal(boxes.length, 2, 'one tick per readable message')
+  assert.ok(boxes.every((node) => node.props.checked === true), 'all ticked by default in full mode')
+  // The picker carries the message text itself, so there is no second preview
+  // repeating it: what is ticked is exactly what is sent.
+  assert.ok(textOf(opened).includes('把那个 bug 修了'), 'the picker shows the conversation text itself')
+
+  // The list scrolls, so the newest message can sit below the fold: the jump
+  // button must actually move it rather than just look like it would.
+  {
+    // The button shows only an arrow, so its label is what identifies it.
+    const jump = controlsOf(opened).find(
+      (node) => node.type === 'button' && node.props['aria-label'] === '回到最新一条',
+    )
+    assert.ok(jump !== undefined, 'the list offers a jump-to-bottom control')
+    // One object stands in for both refs: the list element and the abort
+    // controller, so the click path stays callable.
+    const fake = { scrollTop: 0, scrollHeight: 999, abort() {} }
+    hookRefs.forEach((ref) => { if (ref) ref.current = fake })
+    jump.props.onClick()
+    assert.equal(fake.scrollTop, 999, 'clicking it scrolls the list to its end')
+  }
+
+  // Unticking one message removes it from the request, and only it.
+  boxes[0].props.onChange({ target: { checked: false } })
+  const narrowed = drawBar('把那个 bug 修了')
+  assert.equal(buttonNamed(narrowed, '恢复默认勾选') !== undefined, true, 'the reset shortcut is always available')
+  posted.length = 0
+  buttonNamed(narrowed, '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  assert.ok(!posted[0].body.context.includes('把那个 bug 修了'), 'the unticked message is not sent')
+  assert.ok(posted[0].body.context.includes('修好了'), 'the rest still is')
+
+  // Emptying the selection sends no conversation at all, and says so.
+  buttonNamed(expandBar('把那个 bug 修了'), '清空').props.onClick()
+  const emptied = expandBar('把那个 bug 修了')
+  assert.ok(textOf(emptied).includes('未选任何对话'), 'an empty selection is reported, not hidden')
+  posted.length = 0
+  buttonNamed(emptied, '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  assert.ok(!('context' in posted[0].body), 'an empty selection sends no context key at all')
+
+  // Restoring the default brings the preset back.
+  buttonNamed(expandBar('把那个 bug 修了'), '恢复默认勾选').props.onClick()
+  const restored = expandBar('把那个 bug 修了')
+  const restoredBoxes = controlsOf(restored).filter((node) => node.type === 'input' && node.props.type === 'checkbox')
+  assert.ok(restoredBoxes.every((node) => node.props.checked === true), 'the default ticks come back')
+
+  // Ticking all keeps the newest that fit and reports the cap.
+  buttonNamed(expandBar('把那个 bug 修了'), '全选').props.onClick()
+  const allTicked = expandBar('把那个 bug 修了')
+  posted.length = 0
+  buttonNamed(allTicked, '帮我扩写').props.onClick()
+  await settleFresh('把那个 bug 修了')
+  assert.ok(posted[0].body.context.length <= 1200, 'tick-all still respects the mode budget')
+
+  // A non-contiguous pick: the two outer messages, not the one between them.
+  {
+    chatNodes = [
+      { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '第一段甲' }] } },
+      { kind: 'assistant-step', visibility: 'visible', data: { blocks: [{ kind: 'text', text: '中间段乙' }] } },
+      { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '第三段丙' }] } },
+    ]
+    built.__test.setContext('full')
+    hookState.length = 0
+    hookRefs.length = 0
+    const pick = expandBar('草稿')
+    const pickBoxes = controlsOf(pick).filter((node) => node.type === 'input' && node.props.type === 'checkbox')
+    assert.equal(pickBoxes.length, 3, 'all three readable messages are listed')
+    assert.ok(pickBoxes.every((node) => node.props.checked === true), 'full mode ticks them all')
+    // Untick the middle one, keeping the two ends: a cross-segment selection.
+    pickBoxes[1].props.onChange({ target: { checked: false } })
+    posted.length = 0
+    buttonNamed(expandBar('草稿'), '帮我扩写').props.onClick()
+    await settleFresh('草稿')
+    const picked = posted[0].body.context
+    assert.ok(picked.includes('第一段甲'), 'the first picked segment is sent')
+    assert.ok(picked.includes('第三段丙'), 'the last picked segment is sent')
+    assert.ok(!picked.includes('中间段乙'), 'the segment between them is not')
+    assert.ok(picked.indexOf('第一段甲') < picked.indexOf('第三段丙'), 'segments keep their original order')
+    chatNodes = []
+  }
+
+  // The Host transcript wins over the loaded node window, and the model's own
+  // window decides the recommended size.
+  {
+    chatNodes = [
+      { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '窗口里的消息' }] } },
+    ]
+    built.__test.setContext('full')
+    const history = {
+      messages: [{ who: 'user', text: `只在宿主历史里的旧消息 ${'x'.repeat(1500)}` }],
+      contextWindow: 2000,
+    }
+    const drawCard = () => {
+      hookCursor = 0
+      return mount(
+        built.__test.RewriteCard({
+          t,
+          dock: 'dse-dock',
+          text: '草稿',
+          accept: () => {},
+          background: (max) => built.__test.excerptOf(chatNodes, max),
+          history,
+        }),
+      )
+    }
+    hookState.length = 0
+    hookRefs.length = 0
+    const withHistory = drawCard()
+    assert.ok(textOf(withHistory).includes('只在宿主历史里的旧消息'), 'the drawer lists the Host transcript, not just the loaded window')
+    assert.ok(!textOf(withHistory).includes('窗口里的消息'), 'and the loaded window is not mixed in')
+    assert.ok(textOf(withHistory).includes('2000'), 'the model window is quoted back to the reader')
+    assert.ok(textOf(withHistory).includes('1200'), 'with a recommended size derived from it')
+    assert.ok(textOf(withHistory).includes('已经被压缩掉'), 'and the note says the list is the whole log')
+  }
+
+  // Nothing is trimmed: every ticked passage reaches the request, however long.
+  {
+    chatNodes = Array.from({ length: 40 }, (unused, index) => ({
+      kind: index % 2 === 0 ? 'user' : 'assistant-step',
+      visibility: 'visible',
+      data: index % 2 === 0
+        ? { role: 'user', content: [{ type: 'text', text: `第${index}段 ${'x'.repeat(800)}` }] }
+        : { blocks: [{ kind: 'text', text: `第${index}段 ${'x'.repeat(800)}` }] },
+    }))
+    built.__test.setContext('full')
+    hookState.length = 0
+    hookRefs.length = 0
+    const longBar = expandBar('草稿')
+    assert.ok(textOf(longBar).includes('40/40'), 'the count shows every ticked passage, not a trimmed subset')
+    assert.ok(textOf(longBar).includes('偏长'), 'a very long selection gets a non-blocking warning')
+    assert.ok(textOf(longBar).includes('列表里只有聊天中已经加载出来的部分'), 'and the list explains what it can see')
+    posted.length = 0
+    buttonNamed(longBar, '帮我扩写').props.onClick()
+    await settleFresh('草稿')
+    const longSent = posted[0].body.context
+    assert.ok(longSent.length > 24000, 'a long selection is not trimmed away')
+    assert.ok(longSent.includes('第0段'), 'the oldest ticked passage is sent')
+    assert.ok(longSent.includes('第39段'), 'and the newest')
+
+    // Put the block's own conversation back for the checks that follow.
+    chatNodes = [
+      { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '把那个 bug 修了' }] } },
+      { kind: 'assistant-step', visibility: 'visible', data: { blocks: [{ kind: 'text', text: '修好了，是登录页的空指针。' }] } },
+      { kind: 'tool-call', visibility: 'visible', data: { root: { name: 'read', argsRaw: '{"file_path":"secret.ts"}' } } },
+    ]
+    built.__test.setContext('full')
+  }
 
   // Turning it back off takes effect on the next run, with no reload.
-  built.__test.setContext(false)
+  built.__test.setContext('off')
   posted.length = 0
   buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
   await settleFresh('把那个 bug 修了')
   assert.ok(!('context' in posted[0].body), 'turning it off again stops sending the conversation')
 
-  // Consecutive runs keep following the switch, in both directions.
-  built.__test.setContext(true)
+  // Consecutive runs keep following the mode, in both directions.
+  built.__test.setContext('full')
   posted.length = 0
   buttonNamed(freshBar('把那个 bug 修了'), '帮我扩写').props.onClick()
   await settleFresh('把那个 bug 修了')
@@ -1118,25 +1352,68 @@ hookRefs.length = 0
   assert.equal(posted.length, 2, 'two runs, two requests')
   assert.ok(posted.every((each) => typeof each.body.context === 'string'), 'both runs carry the conversation')
 
-  // The transcript keeps the newest exchanges and drops the oldest.
-  const long = Array.from({ length: 40 }, (unused, index) => ({
+  // The transcript keeps the newest that fit and reports what it dropped.
+  const many = Array.from({ length: 40 }, (unused, index) => ({
     kind: index % 2 === 0 ? 'user' : 'assistant-step',
     visibility: 'visible',
-    data: { content: [{ type: 'text', text: `第${index}条 ${'x'.repeat(200)}` }] },
+    data: { role: 'user', content: [{ type: 'text', text: `第${index}条 ${'x'.repeat(200)}` }] },
   }))
-  const clipped = built.__test.transcriptOf(long, 4000)
-  assert.ok(clipped.length <= 4000, 'the transcript respects its cap')
-  assert.ok(clipped.includes('第39条'), 'the newest exchange is kept')
-  assert.ok(!clipped.includes('第0条'), 'and the oldest is dropped')
+  const cut = built.__test.excerptOf(many, 1200)
+  assert.ok(cut.text.length <= 1200, 'the excerpt respects its budget')
+  assert.ok(cut.text.includes('第39条'), 'the newest exchange is kept')
+  assert.ok(!cut.text.includes('第0条'), 'and the oldest is dropped')
+  assert.ok(cut.dropped > 0, 'the dropped count is reported')
+  // The list is the whole conversation; the preset is a subset of it, so what
+  // is on screen to pick from is never narrowed by the budget.
+  assert.equal(cut.items.length, 40, 'every readable message is listed, not just the preset')
+  assert.equal(cut.auto.size + cut.dropped, 40, 'preset plus dropped is the whole conversation')
+  assert.ok(cut.auto.size > 0, 'the preset ticks something')
+  assert.ok(cut.items.every((item) => typeof item.key === 'string' && item.key !== ''), 'every message has a stable key')
+  assert.equal(new Set(cut.items.map((item) => item.key)).size, 40, 'keys are unique')
 
   // Hidden nodes never reach the transcript.
   assert.ok(
-    !built.__test.transcriptOf([{ kind: 'user', visibility: 'hidden', data: { content: [{ type: 'text', text: '隐藏的话' }] } }], 4000).includes('隐藏的话'),
+    !built.__test.transcriptOf([{ kind: 'user', visibility: 'hidden', data: { role: 'user', content: [{ type: 'text', text: '隐藏的话' }] } }], 4000).includes('隐藏的话'),
     'a hidden node is not part of the context',
   )
 
+  // Only `text` blocks count. An assistant step also carries reasoning, which is
+  // not conversation the reader would recognise, so it must not leak into the
+  // rewrite prompt.
+  {
+    const mixed = [
+      { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '可见提问' }] } },
+      {
+        kind: 'assistant-step',
+        visibility: 'visible',
+        data: {
+          blocks: [
+            { kind: 'reasoning', text: '内部推理不要发送' },
+            { kind: 'text', text: '可见回答' },
+          ],
+        },
+      },
+    ]
+    const picked = built.__test.excerptOf(mixed, 4000)
+    assert.ok(picked.text.includes('可见提问'), 'the user message is read from data.content')
+    assert.ok(picked.text.includes('可见回答'), 'the assistant text block is read from data.blocks')
+    assert.ok(!picked.text.includes('内部推理'), 'reasoning blocks never become context')
+    assert.equal(picked.items.length, 2, 'both messages are listed')
+  }
+
+  // Injected project instructions carry a role that is not the reader's own
+  // voice, so they stay out of the transcript.
+  {
+    const injected = built.__test.excerptOf([
+      { kind: 'user', visibility: 'visible', data: { role: 'constraint', content: [{ type: 'text', text: '项目约定' }] } },
+      { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '我的问题' }] } },
+    ], 4000)
+    assert.ok(!injected.text.includes('项目约定'), 'a constraint is not the reader speaking')
+    assert.ok(injected.text.includes('我的问题'), 'their own message still is')
+  }
+
   chatNodes = []
-  built.__test.setContext(false)
+  built.__test.setContext('off')
 }
 globalThis.fetch = async () => ({ ok: true, json: async () => ({ text: '' }) })
 posted.length = 0
@@ -1148,6 +1425,105 @@ const afterFail = await settle('原始的话')
 assert.ok(textOf(afterFail).includes('这次没改成功'), 'a failed rewrite is reported')
 assert.ok(!textOf(afterFail).includes('采用'), 'a failed rewrite offers nothing to accept')
 assert.equal(writes.length, 0, 'a failed rewrite never touches the draft')
+
+// A failed REVISION must keep the version the reader already had. Losing it
+// means losing the rewrite they were about to accept, and the only way back is
+// to start the whole thing again.
+{
+  hookState.length = 0
+  hookRefs.length = 0
+  posted.length = 0
+  let calls = 0
+  globalThis.fetch = async (url, init) => {
+    posted.push({ url, body: JSON.parse(init.body) })
+    calls += 1
+    return calls === 1
+      ? { ok: true, json: async () => ({ text: '第一版' }) }
+      : { ok: false, json: async () => ({ text: '' }) }
+  }
+  buttonNamed(drawBar('原始的话'), '帮我扩写').props.onClick()
+  const kept = await settle('原始的话')
+  assert.ok(textOf(kept).includes('第一版'), 'the first rewrite landed')
+
+  buttonNamed(kept, '让它改').props.onClick()
+  const askField = controlsOf(drawBar('原始的话')).find((node) => node.type === 'input')
+  askField.props.onChange({ target: { value: '再短一点' } })
+  buttonNamed(drawBar('原始的话'), '改一版').props.onClick()
+  const afterFailedChange = await settle('原始的话')
+
+  assert.equal(posted.length, 2, 'the change was actually sent')
+  assert.equal(posted[1].body.previous, '第一版', 'and it carried the previous version')
+  assert.ok(textOf(afterFailedChange).includes('第一版'), 'a failed change keeps the previous rewrite on screen')
+  assert.ok(textOf(afterFailedChange).includes('采用'), 'so the reader can still accept it')
+  assert.ok(textOf(afterFailedChange).includes('上一版还在'), 'and is told the previous version survived')
+  assert.ok(!textOf(afterFailedChange).includes('这次没改成功'), 'it is not reported as a total failure')
+  assert.equal(writes.length, 0, 'a failed change never touches the draft')
+}
+
+// --- the question card's answer box -----------------------------------
+// A live `ask_user_question` card replaces the composer, so the dock is gone
+// while the reader is answering. The same panel is anchored to the card from
+// the frame overlay; these checks pin the two things it must get right: find
+// the box, and write into it the way typing would.
+{
+  // A minimal stand-in for the card's markup: the root carries the key, the box
+  // is a textarea, and a settled card leaves the box disabled.
+  const textarea = (disabled = false) => ({
+    disabled,
+    value: '',
+    closest: () => card,
+    dispatchEvent: (event) => events.push(event.type),
+  })
+  const events = []
+  let card = { getBoundingClientRect: () => ({ left: 100, width: 600, top: 200 }) }
+  const doc = { querySelectorAll: () => fields }
+  let fields = []
+  globalThis.document = doc
+  globalThis.innerHeight = 800
+
+  fields = []
+  assert.equal(built.__test.questionSeat(doc), null, 'no card: nothing to anchor to')
+
+  fields = [textarea()]
+  const seat = built.__test.questionSeat(doc)
+  assert.equal(seat.field, fields[0], 'the enabled box is the one the reader types in')
+  assert.equal(seat.card, card, 'and its card is what the panel is placed against')
+
+  // A settled card disables its box; a disabled box must never be rewritten.
+  fields = [textarea(true)]
+  assert.equal(built.__test.questionSeat(doc), null, 'a disabled box is not a live answer seat')
+
+  // Writing goes through the native setter and a bubbling input event, which is
+  // how a React controlled textarea learns a value it did not type. The setter
+  // lives on the element's prototype, exactly where a real textarea keeps it.
+  const field = textarea()
+  const proto = Object.getPrototypeOf(field)
+  let setterCalls = 0
+  Object.defineProperty(proto, 'value', {
+    configurable: true,
+    get: () => '',
+    set: () => {
+      setterCalls += 1
+    },
+  })
+  assert.equal(built.__test.writeAnswer(field, '写清楚的答案'), true, 'the write happens')
+  assert.equal(setterCalls, 1, 'the native value setter is used, bypassing React’s tracker')
+  assert.deepEqual(events, ['input'], 'and one input event tells React the value changed')
+  delete proto.value
+
+  // The panel never claims a conversation it cannot read: the card is outside
+  // the chat, so its card carries no context switch and no context key.
+  built.__test.setContext('full')
+  hookState.length = 0
+  hookRefs.length = 0
+  const questionBar = mount(built.__test.RewriteCard({ text: '含糊的回答', accept: () => {}, dock: 'dse-float', t }))
+  assert.ok(textOf(questionBar).includes('帮我扩写'), 'the panel still offers a rewrite')
+  assert.ok(!textOf(questionBar).includes('读取对话'), 'and shows no mode row it could not honour')
+  built.__test.setContext('off')
+
+  delete globalThis.document
+  delete globalThis.innerHeight
+}
 
 // A dead network is the same story, not a crash.
 globalThis.fetch = async () => {
@@ -1178,8 +1554,8 @@ built.apply(stubCtx)
 const slotNames = registered.map((entry) => entry.name)
 assert.deepEqual(
   [...new Set(slotNames)].sort(),
-  ['conversation.approval.detail', 'conversation.chat.turnTail', 'conversation.input.dock', 'settings.general.item', 'settings.section'],
-  'the plugin registers the four surfaces plus both settings seats',
+  ['conversation.approval.detail', 'conversation.chat.turnTail', 'conversation.input.dock', 'settings.general.item', 'settings.section', 'shell.overlay'],
+  'the plugin registers the four surfaces, both settings seats and the question-card overlay',
 )
 const section = registered.find((entry) => entry.name === 'settings.section')
 assert.equal(section.id, 'step-explain', 'the Settings page has its own id')
@@ -1191,11 +1567,105 @@ assert.equal(generalItem.id, 'step-explain', 'the General row is unchanged and s
 assert.equal(generalItem.order, 95, 'and keeps its position')
 // The dock cells keep their distinct ids so neither replaces the other.
 const dockIds = registered.filter((entry) => entry.name === 'conversation.input.dock').map((entry) => entry.id)
-assert.deepEqual(dockIds, ['step-explain', 'step-explain-rewrite'], 'the two dock cells keep separate ids')
+assert.deepEqual(dockIds, ['step-explain-welcome', 'step-explain', 'step-explain-rewrite'], 'the three dock cells keep separate ids')
 // No surface registered here can answer an approval.
 assert.ok(
   registered.every((entry) => entry.name !== 'conversation.approval.action'),
   'nothing registers an approval answer',
 )
+// The question card's panel is its own overlay cell, and it still cannot answer
+// anything: it writes into a text box the reader then submits themselves.
+const overlay = registered.find((entry) => entry.name === 'shell.overlay')
+assert.equal(overlay.id, 'step-explain-question', 'the overlay cell has its own id')
+assert.equal(overlay.component, built.__test.QuestionRewrite, 'and renders the question-card panel')
+assert.ok(
+  registered.every((entry) => entry.name !== 'conversation.composer'),
+  'the question card is never taken over: the plugin only adds a panel above it',
+)
+
+// --- the one-time welcome --------------------------------------------
+// It fires the first time the plugin runs in a browser profile, which is the
+// closest thing the client has to "just installed and enabled".
+{
+  const welcomeStore = new Map()
+  globalThis.localStorage = {
+    getItem: (key) => welcomeStore.get(key) ?? null,
+    setItem: (key, value) => welcomeStore.set(key, value),
+  }
+  assert.equal(built.__test.readWelcomed(), false, 'a fresh profile has not dismissed the welcome')
+
+  const welcome = render(built.__test.Welcome, {})
+  const text = textOf(welcome)
+  assert.ok(text.includes('步骤解释已开启'), 'the welcome says what was turned on')
+  assert.ok(text.includes('输入框上方'), 'and names the first surface')
+  assert.ok(text.includes('每轮说完'), 'the second')
+  assert.ok(text.includes('弹出审批框'), 'the third')
+  const dismiss = buttonNamed(welcome, '知道了')
+  assert.ok(dismiss !== undefined, 'and it can be dismissed')
+
+  dismiss.props.onClick()
+  assert.equal(welcomeStore.get('dsh-step-explain/welcome'), 'done', 'dismissing is remembered for the profile')
+  assert.equal(built.__test.readWelcomed(), true, 'and reads back as dismissed')
+  assert.equal(render(built.__test.Welcome, {}), null, 'it never renders again')
+
+  delete globalThis.localStorage
+}
+
+// --- picking a run of messages ---------------------------------------
+// The toggle changes what one click means; Shift closes a range. Both act on
+// the same rows, so they are checked against one five-message conversation.
+{
+  chatNodes = Array.from({ length: 5 }, (unused, index) => ({
+    kind: index % 2 === 0 ? 'user' : 'assistant-step',
+    visibility: 'visible',
+    data: index % 2 === 0
+      ? { role: 'user', content: [{ type: 'text', text: `第${index}条` }] }
+      : { blocks: [{ kind: 'text', text: `第${index}条` }] },
+  }))
+  built.__test.setContext('full')
+  const boxesOf = (tree) => controlsOf(tree).filter((node) => node.type === 'input' && node.props.type === 'checkbox')
+
+  const bar = freshBar('草稿')
+  assert.equal(
+    buttonNamed(bar, '点一条选到最新').props['aria-pressed'],
+    false,
+    'the run-to-newest mode starts off',
+  )
+
+  // Off: a click ticks exactly one message.
+  buttonNamed(bar, '清空').props.onClick()
+  boxesOf(drawBar('草稿'))[1].props.onChange({ target: { checked: true } })
+  assert.ok(textOf(drawBar('草稿')).includes('已选 1/5'), 'off: one click ticks one message')
+
+  // On: with nothing ticked, a click runs to the newest.
+  buttonNamed(drawBar('草稿'), '点一条选到最新').props.onClick()
+  const on = drawBar('草稿')
+  assert.equal(
+    buttonNamed(on, '点一条选到最新').props['aria-pressed'],
+    true,
+    'the button shows the mode is on',
+  )
+  buttonNamed(on, '清空').props.onClick()
+  boxesOf(drawBar('草稿'))[1].props.onChange({ target: { checked: true } })
+  assert.ok(textOf(drawBar('草稿')).includes('已选 4/5'), 'on: the click runs from there to the newest')
+
+  // Off again: a click stays a single message even with nothing ticked.
+  buttonNamed(drawBar('草稿'), '点一条选到最新').props.onClick()
+  buttonNamed(drawBar('草稿'), '清空').props.onClick()
+  boxesOf(drawBar('草稿'))[2].props.onChange({ target: { checked: true } })
+  assert.ok(textOf(drawBar('草稿')).includes('已选 1/5'), 'off again: back to one message per click')
+
+  // Shift closes the range between the anchor and the clicked message.
+  buttonNamed(drawBar('草稿'), '清空').props.onClick()
+  boxesOf(drawBar('草稿'))[0].props.onChange({ target: { checked: true } })
+  const row = controlsOf(drawBar('草稿')).filter((node) => node.type === 'label' && node.props.className === 'dse-context-item')[2]
+  let prevented = false
+  row.props.onClick({ shiftKey: true, preventDefault: () => { prevented = true } })
+  assert.ok(prevented, 'a Shift click does not let the box flip itself')
+  assert.ok(textOf(drawBar('草稿')).includes('已选 3/5'), 'Shift selects the range between the two ends')
+
+  chatNodes = []
+  built.__test.setContext('off')
+}
 
 console.log('dsh-step-explain: all self-checks passed')

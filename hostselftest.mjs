@@ -1,7 +1,7 @@
 // Self-check for dsh-step-explain's Host half. No dependency, no network:
 //   node hostselftest.mjs
 import assert from 'node:assert/strict'
-import { apply, clean, cleanRewrite, parseInput, parseRewrite } from './index.js'
+import { apply, clean, cleanRewrite, parseInput, parseRewrite, transcriptOf } from './index.js'
 
 // --- parsing at the wire ---------------------------------------------
 assert.deepEqual(parseInput({ name: 'read', argsRaw: '{"file_path":"a"}' }), {
@@ -46,7 +46,22 @@ const ctx = {
   inject: (deps, fn) => fn(ctx),
   // Only `agentDefaultModel` is read late, through `get`, so a profile without
   // it degrades instead of failing the whole registration.
-  get: (key) => (key === 'agentDefaultModel' ? ctx.agentDefaultModel : undefined),
+  get: (key) => {
+    if (key === 'agentDefaultModel') return ctx.agentDefaultModel
+    if (key === 'sessionQuery') return ctx.sessionQuery
+    return undefined
+  },
+  sessionQuery: {
+    readSession: async (id) =>
+      id === 's1'
+        ? {
+            events: [
+              { type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '旧消息' }] } },
+              { type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'text', text: '旧回答' }] } } },
+            ],
+          }
+        : undefined,
+  },
   connection: {
     fetch: {
       register: (route) => {
@@ -56,6 +71,7 @@ const ctx = {
     },
   },
   llm: {
+    resolveModelInfo: async () => ({ context: { contextWindow: 64000 } }),
     prepareCall: async () => ({
       config: { provider: 'p', model: 'm', maxTokens: 200 },
       async *stream() {
@@ -71,11 +87,42 @@ const ctx = {
 }
 apply(ctx)
 
-assert.equal(routes.length, 3, 'all three routes are registered')
+assert.equal(routes.length, 4, 'all four routes are registered')
 const route = routes.find((r) => r.path === '/api/step-explain.detail')
 const rewriteRoute = routes.find((r) => r.path === '/api/step-explain.rewrite')
 const modelRoute = routes.find((r) => r.path === '/api/step-explain.model')
-assert.ok(route !== undefined && rewriteRoute !== undefined && modelRoute !== undefined, 'detail, rewrite and model all exist')
+const chatRoute = routes.find((r) => r.path === '/api/step-explain.chat')
+assert.ok(
+  route !== undefined && rewriteRoute !== undefined && modelRoute !== undefined && chatRoute !== undefined,
+  'detail, rewrite, model and chat all exist',
+)
+
+// The chat route answers with the whole transcript and the model's window, so the
+// drawer can offer history the UI has not loaded and size it to the model.
+{
+  const answerChat = await chatRoute.fetch(
+    new Request('http://host/api/step-explain.chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's1' }),
+    }),
+  )
+  const body = await answerChat.json()
+  assert.deepEqual(body.messages, [
+    { who: 'user', text: '旧消息' },
+    { who: 'assistant', text: '旧回答' },
+  ], 'the chat route returns the Host transcript')
+  assert.equal(body.contextWindow, 64000, 'and the selected model window')
+
+  const missing = await chatRoute.fetch(
+    new Request('http://host/api/step-explain.chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    }),
+  )
+  assert.equal(missing.status, 400, 'a request without a session id is refused')
+}
 for (const each of [route, rewriteRoute]) {
   assert.deepEqual([...each.methods], ['POST'])
   assert.equal(each.requestBody, 'buffered')
@@ -312,7 +359,11 @@ assert.equal(parseRewrite({ text: 'x', context: '用户: 修那个 bug' }).conte
 assert.equal(parseRewrite({ text: 'x' }).context, '', 'no context means an empty one')
 assert.equal(parseRewrite({ text: 'x', context: 7 }), undefined, 'a non-string context is refused')
 assert.equal(parseRewrite({ text: 'x', context: { text: 'x' } }), undefined, 'a structured context is refused rather than coerced')
-assert.equal(parseRewrite({ text: 'x', context: 'y'.repeat(9000) }).context.length, 4000, 'the context is capped like the draft')
+// The context has no product cap: a reader may tick the whole conversation. The
+// only bound is a safety valve against a multi-megabyte body, so a normal long
+// transcript passes through untouched.
+assert.equal(parseRewrite({ text: 'x', context: 'y'.repeat(9000) }).context.length, 9000, 'a long context is not clipped')
+assert.equal(parseRewrite({ text: 'x', context: 'y'.repeat(1_000_001) }).context.length, 1_000_000, 'only a pathological body is bounded')
 {
   let withContext
   ctx.llm.prepareCall = async (config) => ({
@@ -589,5 +640,27 @@ const lockedPut = await locked
   )
 assert.equal(lockedPut.status, 409, 'an unwritable profile is a conflict, not a silent success')
 assert.equal((await lockedPut.json()).error, 'unavailable')
+
+// The transcript reader walks the session event log, not the model-visible surface.
+{
+  const events = [
+    { type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '把那个 bug 修了' }] } },
+    { type: 'assistant/message', surfaceOp: 'append', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '修好了。' }] } } },
+    { type: 'user/message', surfaceOp: 'append', data: { source: { kind: 'agent-instructions' }, content: [{ type: 'text', text: '项目约定' }] } },
+    { type: 'assistant/message', surfaceOp: 'append', data: { message: { content: [{ type: 'reasoning', text: '思考中' }, { type: 'text', text: '第二句回答' }] } } },
+    { type: 'tool/result', surfaceOp: 'append', data: { content: [{ type: 'text', text: '工具输出' }] } },
+    { type: 'user/message', surfaceOp: 'remove', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '被压缩掉的消息' }] } },
+  ]
+  assert.deepEqual(
+    transcriptOf(events),
+    [
+      { who: 'user', text: '把那个 bug 修了' },
+      { who: 'assistant', text: '修好了。' },
+      { who: 'assistant', text: '第二句回答' },
+    ],
+    'both sides survive; injected instructions, reasoning, tool output and shadowed events do not',
+  )
+  assert.deepEqual(transcriptOf(undefined), [], 'a missing log reads as an empty transcript')
+}
 
 console.log('dsh-step-explain host: all self-checks passed')

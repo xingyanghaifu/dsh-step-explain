@@ -6,6 +6,9 @@ Explains every step the model takes in plain language anyone can follow.
 
 English | [简体中文](README.zh-CN.md)
 
+> New here? There is a plain-language guide written for non-technical readers:
+> **[使用说明（大白话版）](使用说明.md)** (Chinese).
+
 ---
 
 ## The problem it solves
@@ -19,9 +22,14 @@ English | [简体中文](README.zh-CN.md)
 
 ## Three surfaces
 
+On first run a one-time card above the composer names the three surfaces below; **Got it** dismisses it for that browser profile (a different browser introduces it again).
+
+
 1. **Above the composer** — the step the model is running right now, in one line, with a "What is this" button that expands the details.
 2. **At the end of each turn** — a summary of every step in that turn, expandable step by step.
 3. **In the approval dialog** — takes over the raw-command line and replaces it with a full explanation (risk plus the consequence of each choice).
+
+"Rewrite this" works in two places: **above the composer** (see below), and **in the box where the model asks you a question** — a question card takes over the whole composer, so the panel attaches above that card instead and writes into its answer box. The card is outside the chat, so that one shows no "read chat" switch: it cannot read the conversation and does not pretend to.
 
 There are two settings entry points: **Settings → Step Explain** (this plugin's own page, with the fullest explanation, sitting beside pages from other plugins), and a row inside **Settings → General** (a shortcut). Both edit the same setting, so they never disagree.
 
@@ -53,18 +61,32 @@ The top right has **three length levels** side by side: **Short / Medium / Full*
 
 **It never sends for you**: unless you click **Use it**, nothing in the composer changes, and sending is always your Enter. The composer stays usable while a rewrite runs.
 
-### Reading the conversation (off by default)
+### Rewriting while the model asks you a question
 
-A rewrite can read the current conversation, so a sentence like "fix that bug" is rewritten into something specific instead of staying vague about what "that" means. The bar shows a **Read chat: on/off** button, and the same switch sits in **Settings → Step Explain**.
+When the model calls the question tool, its card takes over the composer and the rewrite bar goes with it. The plugin therefore attaches the **same panel** above that card's answer box: type "the second one, because…", click **Rewrite**, and **Use it** writes the result into the box. You still click the card's own submit.
 
-| State | What a rewrite sends |
+It does exactly what typing does — write the value, fire one `input` event, and let the card re-render. It does not read the card's choices and never submits for you. The card is outside the chat, so this instance shows no "read chat" switch.
+
+> This is the plugin's only place that locates UI by page structure (the enabled textarea inside the element carrying `data-question-key`). If the shipped card changes those attributes, the panel quietly does not appear and the card itself is unaffected.
+
+### Reading the conversation (nothing by default)
+
+A rewrite can read the current conversation, so a sentence like "fix that bug" is rewritten into something specific instead of staying vague about what "that" means. The bar offers **None / Pick messages**, and the same two sit in **Settings → Step Explain**.
+
+| Mode | What a rewrite sends |
 | --- | --- |
-| **Off** (default) | Only the sentence in your composer, plus any change you asked for. Nothing about the conversation leaves this machine. |
-| **On** | The same, plus the last few messages between you and the assistant, up to 4000 characters. |
+| **None** (default) | Only the sentence in your composer, plus any change you asked for. Nothing about the conversation leaves this machine. |
+| **Pick messages** | The same, plus the whole conversation listed and ticked by default, with **no cap**: everything ticked is sent, never trimmed. |
 
-What is read, when it is on: your own visible messages and the assistant's visible replies, newest first until the cap. Tool arguments, tool results, reasoning and anything hidden are never included — a rewrite needs to know what you meant, not what the tools were doing. The transcript is labelled as background in the request, so the model treats it as context for the sentence and not as a second instruction to rewrite.
+The picker expands **inline in the composer** (no overlay, no sidebar) with a height that adapts to the window, and reads the full session log — including messages compaction already hid from the model. It recommends a size from the **selected model's context window**, with a non-blocking warning when the selection goes past it.
 
-The switch is read at send time, so flipping it applies to the very next rewrite with no reload. Its state is remembered per browser.
+Choosing **Pick messages** opens a per-message list: only what is ticked is sent, the picks need not be adjacent, and the list offers Tick all / Clear / Restore the default ticks plus a jump-to-newest button. A **Click one, pick to newest** toggle makes a single click after Clear run to the newest message, and **Shift-clicking** another message selects the range between the two.
+
+What is read: your own visible messages and the assistant's visible replies. Tool arguments, tool results, reasoning and anything hidden are never included — a rewrite needs to know what you meant, not what the tools were doing. The transcript is labelled as background in the request, so the model treats it as context for the sentence and not as a second instruction to rewrite.
+
+A rewrite is **its own request**, separate from the current conversation, so it does not consume that conversation's context; the real ceiling is the model's own context window, not a number this plugin invents.
+
+The mode is read at send time, so changing it applies to the very next rewrite with no reload. Its state is remembered per browser.
 
 > A request is sent only when you click **Rewrite**. What it carries is the text in your composer (plus any change you asked for, plus the conversation when the switch is on). No click, no request.
 
@@ -76,15 +98,15 @@ The switch is read at send time, so flipping it applies to the very next rewrite
 
 | Where | Control | Levels |
 | --- | --- | --- |
-| Top right of the approval dialog | Cycle button (one click, one level forward) | Basic → Model notes → Full |
+| Top right of the approval dialog | Three buttons side by side | Basic / Model notes / Full |
 | Settings → Step Explain, and the approval dialog | Three buttons side by side | Basic / Model notes / Full |
 | "Say it clearly" above the composer | Three buttons side by side | Short / Medium / Full |
 
 All three are three levels or more; none is still a "brief / detailed" two-state toggle. The approval level is shared between the settings page and the dialog itself, so changing one changes the other.
 
-## Approval-dialog levels (three, one click each)
+## How detailed the approval notes are (three levels, all visible, one click each)
 
-The button in the top right cycles the level. It always shows the level you are on, and the choice survives a refresh:
+The three buttons in the top right sit side by side, with the level you are on marked. The choice survives a refresh:
 
 | Level | What you see |
 | --- | --- |
@@ -98,9 +120,9 @@ The **Full** level is for "first time seeing this, I want to understand before d
 
 ## What the explanation contains
 
-Each step names what is happening, then adds how much of the *behaviour* you asked to learn. That is the **study level**, a setting of its own:
+Each step names what is happening, then adds how much of the *behaviour* you asked to learn. That is the **explanation depth**, a setting of its own:
 
-| Study level | What the step shows |
+| Explanation depth | What the step shows |
 | --- | --- |
 | **What** | What this step is doing, in plain words. |
 | **Why** | The same, plus what this kind of step is usually for. |
@@ -130,19 +152,19 @@ This is an explanation only; it does not choose for you.
 
 The warning line is missing above because `npm test` does not look destructive. Recursive delete, force push, `DROP TABLE`, piped-into-shell and the like add a red line under the command.
 
-## The study level (how much it teaches you)
+## Explanation depth (how much it teaches you)
 
-**Settings → Step Explain → How much it teaches** has three buttons: **What / Why / Next**. They stack — Next includes Why, and Why includes What — so picking a higher level never loses the line you already had.
+**Settings → Step Explain → Explanation depth** has three buttons: **What / Why / Next**. They stack — Next includes Why, and Why includes What — so picking a higher level never loses the line you already had.
 
 - **What** names the action only. The quietest of the three.
 - **Why** adds what this kind of operation is normally for: reading to see before changing, writing to make a worked-out change take effect, running to confirm from real output, and so on.
 - **Next** adds what commonly follows: read → more reading or a change, write → a test or command, command → read the output and decide, question → wait for your answer.
 
-Everything on all three levels is local rule text. **No level sends anything anywhere**; the study level is independent of the model switch and the Model notes level, which are the two things that can go online.
+Everything on all three levels is local rule text. **No level sends anything anywhere**; the explanation depth is independent of the model switch and the Model notes level, which are the two things that can go online.
 
 ## Having the current model write each step's explanation (off by default)
 
-**Settings → Step Explain → Have the current model write each step's explanation** replaces the local rule text with text written by the current model, at the study level you picked. It is off by default.
+**Settings → Step Explain → Have the current model write each step's explanation** replaces the local rule text with text written by the current model, at the explanation depth you picked. It is off by default.
 
 - **Off** — every explanation is generated on this machine. No request, no tokens, no network.
 - **On** — every tool call sends its own request to the current model (or the one picked above) and the answer becomes the explanation for that step.
@@ -151,7 +173,7 @@ The impact and reversible lines always stay local, because they are the facts th
 
 The switch covers every surface, the approval dialog included. That dialog also keeps its own **Model notes** level, which asks for a model paragraph even when the switch is off.
 
-**This costs tokens.** Each step is a separate request: the tool name, its raw arguments, and a short answer (capped at 200 tokens for the shortest study level, 320 for the fuller ones). A ten-step turn is ten requests. That spend comes out of your current model quota and is billed separately from the chat itself. The settings page states this in a warning line under the switch.
+**This costs tokens.** Each step is a separate request: the tool name, its raw arguments, and a short answer (capped at 200 tokens for the shortest explanation depth, 320 for the fuller ones). A ten-step turn is ten requests. That spend comes out of your current model quota and is billed separately from the chat itself. The settings page states this in a warning line under the switch.
 
 Two things keep the bill down without changing what you see:
 
@@ -244,7 +266,7 @@ node selftest.mjs      # interface and explanation layer
 node hostselftest.mjs  # Host half (routes, validation, failure fallback)
 ```
 
-Node only, no dependencies (the Host check uses a fake Context and makes no network call). Covered: category fallback, risk judgement, dangerous-command detection, truncated and malformed JSON arguments, running and finished tool nodes, hidden-node filtering, zh/en dictionary parity, every `t('...')` key in the source existing, the real rendered text of all three surfaces in four states (empty / running / finished / approval), the three approval levels actually differing (Basic neither goes online nor adds a paragraph, Model notes adds exactly one model paragraph, Full really gains five sections and is clearly longer, and all three render only the level button with no Allow / Reject control), the level cycle and old-value fallback (an old `on`/`off` or garbage value returns to Basic), the settings row's read and write (reading back the saved choice, showing a change only after a successful save, and distinct notices for a failed save and an unreadable one), the settings page's content and three level buttons (all three listed, the current one marked `aria-pressed`, a pick writing to the same storage key, and the page stating which level goes online and what the read-only boundary is), **actually clicking every level on the page in a live hook runtime** (the store updates, the re-render follows the pick, and it can go back — covering the "visible but does not respond" regression), the cascade order of the selected-state style (the selected rule must come after the base rule and after `:hover`, or equal specificity lets the base rule win and all three buttons look identical — which was exactly the "clicking does nothing" cause), and which cells `apply` actually registers (four chat surfaces, the settings page and the General row; the page's `id`/`locale` nav label is right, the two dock cells use distinct `id`s, and no cell registers an approval answer), the rewrite bar's whole flow (no draft / use / revert / ask for a change / failure, including Enter never sending the message), the three rewrite lengths (all three listed, the default on Full, the highlight moving on click, and the three never collapsing into two), the Host producing a different system prompt per level (asserting the three prompts differ from one another, so no level can be silently folded into another), **the settings row and the settings page sharing one model dropdown** (both render the same `select` props and options, and the source builds `dse-select` only once, so two implementations cannot drift apart); plus the Host's request validation (types, required fields, length caps, a model pair needing both provider and model, an unknown length refused), only `text-delta` reaching the body, model precedence (saved settings choice → config → chat default), **profile reads being cached and immediately invalidated by a save** (the explain, rewrite and settings routes share one read rather than one each — the cache is keyed by Loader entry, not by context object, because each route holds a different derived context), model output sanitizing (code fences and prefixes), model errors / no route / no default model all answering 200 with an empty result, and the model setting's read, save, clear, and rejection of invalid input (400/415), with 409 rather than a fake success when the configuration is read-only.
+Node only, no dependencies (the Host check uses a fake Context and makes no network call). Covered: category fallback, risk judgement, dangerous-command detection, truncated and malformed JSON arguments, running and finished tool nodes, hidden-node filtering, zh/en dictionary parity, every `t('...')` key in the source existing, the real rendered text of all three surfaces in four states (empty / running / finished / approval), the three approval levels actually differing (Basic neither goes online nor adds a paragraph, Model notes adds exactly one model paragraph, Full really gains five sections and is clearly longer, and all three render only the level button with no Allow / Reject control), old-value fallback (an old `on`/`off` or garbage value returns to Basic), the settings row's read and write (reading back the saved choice, showing a change only after a successful save, and distinct notices for a failed save and an unreadable one), the settings page's content and three level buttons (all three listed, the current one marked `aria-pressed`, a pick writing to the same storage key, and the page stating which level goes online and what the read-only boundary is), **actually clicking every level on the page in a live hook runtime** (the store updates, the re-render follows the pick, and it can go back — covering the "visible but does not respond" regression), the cascade order of the selected-state style (the selected rule must come after the base rule and after `:hover`, or equal specificity lets the base rule win and all three buttons look identical — which was exactly the "clicking does nothing" cause), and which cells `apply` actually registers (four chat surfaces, the settings page and the General row; the page's `id`/`locale` nav label is right, the two dock cells use distinct `id`s, and no cell registers an approval answer), the rewrite bar's whole flow (no draft / use / revert / ask for a change / failure, including Enter never sending the message), the three rewrite lengths (all three listed, the default on Full, the highlight moving on click, and the three never collapsing into two), the Host producing a different system prompt per level (asserting the three prompts differ from one another, so no level can be silently folded into another), **the settings row and the settings page sharing one model dropdown** (both render the same `select` props and options, and the source builds `dse-select` only once, so two implementations cannot drift apart); plus the Host's request validation (types, required fields, length caps, a model pair needing both provider and model, an unknown length refused), only `text-delta` reaching the body, model precedence (saved settings choice → config → chat default), **profile reads being cached and immediately invalidated by a save** (the explain, rewrite and settings routes share one read rather than one each — the cache is keyed by Loader entry, not by context object, because each route holds a different derived context), model output sanitizing (code fences and prefixes), model errors / no route / no default model all answering 200 with an empty result, and the model setting's read, save, clear, and rejection of invalid input (400/415), with 409 rather than a fake success when the configuration is read-only.
 
 ## Known limits
 

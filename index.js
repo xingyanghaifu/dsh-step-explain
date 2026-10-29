@@ -23,17 +23,21 @@ const PATH = '/api/step-explain.detail'
 const REWRITE_PATH = '/api/step-explain.rewrite'
 /** Settings route: read and save the model this plugin uses. */
 const MODEL_PATH = '/api/step-explain.model'
+/** Transcript route: the whole conversation, for the chat-picking drawer. */
+const CHAT_PATH = '/api/step-explain.chat'
 const MAX_ARGS_CHARS = 2000
 const MAX_DETAIL_CHARS = 600
 /** A rewrite may be longer than a one-line explanation but still bounded. */
 const MAX_REWRITE_CHARS = 4000
 /**
- * How much conversation a rewrite may carry. Bounded because it is context for
- * one instruction, not a second copy of the session: a few recent exchanges are
- * enough to know what "那个 bug" refers to, and the cap keeps the token cost of
- * the optional context predictable.
+ * How much conversation a rewrite may carry.
+ *
+ * Not a product limit: the reader decides how much to tick, and a rewrite is
+ * its own isolated request, so the real ceiling is the model's context window.
+ * This constant only stops a pathological body (a multi-megabyte paste) from
+ * reaching the provider, where it would fail more slowly and less clearly.
  */
-const MAX_CONTEXT_CHARS = 4000
+const MAX_CONTEXT_CHARS = 1_000_000
 const MAX_ID_CHARS = 120
 const TIMEOUT_MS = 20_000
 /** Prose only: no Markdown, no restating the arguments, no advice. */
@@ -192,6 +196,150 @@ function selectModel(ctx, input, route) {
  * plugin reloads; upgrade to a file watch if that becomes a real workflow.
  */
 let routeCache
+
+/**
+ * Join the text blocks of one message, ignoring reasoning and tool payloads.
+ * @param blocks - block array, or a plain string for older shapes.
+ * @returns the readable text, or '' when there is none.
+ */
+function blocksText(blocks) {
+  if (typeof blocks === 'string') return blocks.replace(/\s+/g, ' ').trim()
+  if (!Array.isArray(blocks)) return ''
+  const parts = []
+  for (const block of blocks) {
+    if (block === null || typeof block !== 'object') continue
+    if (block.kind !== 'text' && block.type !== 'text') continue
+    if (typeof block.text === 'string' && block.text !== '') parts.push(block.text)
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * The readable messages of one session's event log, oldest first.
+ *
+ * Takes the raw log rather than the model-visible surface: compaction marks old
+ * messages as shadowed, and the reader still needs to pick them. Assistant text
+ * lives at `data.message.content`; a user message keeps it at `data.content`.
+ * @param events - session events, in log order.
+ * @returns `[{ who: 'user' | 'assistant', text }]`.
+ */
+export function transcriptOf(events) {
+  if (!Array.isArray(events)) return []
+  const out = []
+  for (const event of events) {
+    if (event === null || event === undefined || typeof event !== 'object') continue
+    // 'append' is a real message; shadow/remove events are compaction bookkeeping.
+    if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') continue
+    const who = event.type === 'user/message' ? 'user' : event.type === 'assistant/message' ? 'assistant' : ''
+    if (who === '') continue
+    if (who === 'user') {
+      const source = event.data?.source
+      if (source !== undefined && source.kind !== 'user') continue
+    }
+    const text = blocksText(who === 'assistant' ? event.data?.message?.content : event.data?.content)
+    if (text === '') continue
+    out.push({ who, text })
+  }
+  return out
+}
+
+/**
+ * The full event log for one session.
+ *
+ * `sessionQuery.readSession` answers for both a live and a cold session, which is
+ * what the drawer needs. The live Session's own surface is only the model-visible
+ * window, so it is the fallback, not the source.
+ * @param ctx - Host context.
+ * @param sessionId - the session to read.
+ * @returns session events, or an empty array.
+ */
+async function readSessionEvents(ctx, sessionId) {
+  try {
+    const answer = await ctx.get('sessionQuery')?.readSession?.(sessionId)
+    if (Array.isArray(answer?.events)) return answer.events
+  } catch {
+    // fall through to the live session
+  }
+  try {
+    const session = ctx.get('sessions')?.get?.(sessionId)
+    if (session === undefined) return []
+    if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+    const seqs = session.surface?.nodes
+    if (!Array.isArray(seqs)) return []
+    return seqs.map((seq) => {
+      try {
+        return session.eventAt(seq)
+      } catch {
+        return undefined
+      }
+    }).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** The context window of the model this plugin would use, when the Host knows it. */
+async function readContextWindow(ctx, session) {
+  const llm = ctx.llm ?? ctx.get('llm')
+  // The plugin's own saved choice wins: that is the model the rewrite will use.
+  const saved = savedRoute(ctx)
+  if (saved !== undefined) {
+    try {
+      const info = await llm?.resolveModelInfo?.(saved.provider, saved.model)
+      const size = info?.context?.contextWindow
+      if (typeof size === 'number' && size > 0) return size
+    } catch {
+      // fall through
+    }
+  }
+  // No saved choice: the session's own request context is the real route.
+  try {
+    const size = session?.requestContext?.()?.contextWindow
+    if (typeof size === 'number' && size > 0) return size
+  } catch {
+    // fall through
+  }
+  try {
+    const fallback = ctx.get('agentDefaultModel')?.currentSelection()
+    if (fallback !== undefined) {
+      const info = await llm?.resolveModelInfo?.(fallback.provider, fallback.model)
+      const size = info?.context?.contextWindow
+      if (typeof size === 'number' && size > 0) return size
+    }
+  } catch {
+    // unknown
+  }
+  return undefined
+}
+
+/**
+ * POST /api/step-explain.chat — the whole transcript for one session.
+ *
+ * Answers `{ messages: [], contextWindow: null }` for anything it cannot read,
+ * so the drawer falls back to the loaded window instead of breaking.
+ */
+async function handleChat(ctx, request) {
+  if (!String(request.headers.get('content-type')).startsWith('application/json')) {
+    return Response.json({ error: 'json' }, { status: 415 })
+  }
+  const body = await request.json().catch(() => undefined)
+  const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.slice(0, MAX_ID_CHARS) : ''
+  if (sessionId === '') return Response.json({ error: 'invalid' }, { status: 400 })
+  try {
+    const session = ctx.get('sessions')?.get?.(sessionId)
+    const events = await readSessionEvents(ctx, sessionId)
+    const contextWindow = await readContextWindow(ctx, session)
+    return Response.json(
+      {
+        messages: transcriptOf(events),
+        contextWindow: contextWindow ?? null,
+      },
+      { headers: { 'cache-control': 'no-store' } },
+    )
+  } catch {
+    return Response.json({ messages: [], contextWindow: null })
+  }
+}
 
 /**
  * Read the saved model from the profile patch, or undefined when unset.
@@ -393,6 +541,7 @@ export function apply(ctx, config) {
     [PATH, handle, ['POST']],
     [REWRITE_PATH, handleRewrite, ['POST']],
     [MODEL_PATH, handleModel, ['GET', 'PUT']],
+    [CHAT_PATH, handleChat, ['POST']],
   ]) {
     ctx.inject(['connection', 'llm'], (sctx) =>
       sctx.connection.fetch.register({
