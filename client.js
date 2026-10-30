@@ -632,7 +632,22 @@ window.__ModuleLoader__.load({
      * context for the model, never instructions to the Host: nothing here is
      * executed, and the answer only ever lands in the draft.
      */
-    async function fetchRewrite({ text, tone, lang, previous, instruction, context }, signal) {
+    async function fetchRewrite({ text, tone, lang, previous, instruction, context }, signal, waitOverride) {
+      // A machine that knows it has no network should say so at once, not wait
+      // out a connection that will never open.
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return { text: '', reason: 'offline' }
+      }
+      // The outer signal is the caller's (unmount); the timer is ours. Either
+      // one aborts the request, and `timedOut` tells the two apart.
+      const controller = new AbortController()
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, waitOverride ?? rewriteWaitFor(context))
+      const relay = () => controller.abort()
+      if (signal !== undefined) signal.addEventListener('abort', relay)
       try {
         const response = await fetch(REWRITE_ROUTE, {
           method: 'POST',
@@ -647,16 +662,51 @@ window.__ModuleLoader__.load({
             // distinguish "empty context" from "context not offered".
             ...(context === undefined || context === '' ? {} : { context }),
           }),
-          signal,
+          signal: controller.signal,
         })
-        if (!response.ok) return ''
+        if (!response.ok) return { text: '', reason: 'provider' }
         const body = await response.json()
-        return typeof body?.text === 'string' ? body.text : ''
-      } catch {
-        return ''
+        const answer = typeof body?.text === 'string' ? body.text : ''
+        const reason = typeof body?.reason === 'string' ? body.reason : answer === '' ? 'empty' : null
+        return { text: answer, reason }
+      } catch (error) {
+        if (timedOut || error?.name === 'TimeoutError') return { text: '', reason: 'timeout' }
+        // The caller ignores this when it aborted on purpose; otherwise the
+        // request never reached the Host.
+        return { text: '', reason: 'offline' }
+      } finally {
+        clearTimeout(timer)
+        if (signal !== undefined) signal.removeEventListener('abort', relay)
       }
     }
 
+
+    /**
+     * How long the browser waits for a rewrite before it calls it dead.
+     *
+     * The Host has its own budget (60s, or 120s with a large transcript). These
+     * sit a little above that so the Host's specific answer normally wins — but
+     * when the request never leaves the machine, only these stop the button
+     * from sitting on "正在改写…" forever.
+     */
+    const REWRITE_WAIT_MS = 70_000
+    const REWRITE_WAIT_LONG_MS = 130_000
+    const REWRITE_WAIT_LONG_CONTEXT_CHARS = 200_000
+
+    /** The browser's ceiling for this request, mirroring the Host's tiers. */
+    function rewriteWaitFor(context) {
+      return String(context ?? '').length > REWRITE_WAIT_LONG_CONTEXT_CHARS ? REWRITE_WAIT_LONG_MS : REWRITE_WAIT_MS
+    }
+
+    /** Reason codes the Host reports, mapped to the sentence a reader sees. */
+    const REWRITE_REASON_KEY = {
+      'no-model': 'rewrite.reason.noModel',
+      timeout: 'rewrite.reason.timeout',
+      provider: 'rewrite.reason.provider',
+      offline: 'rewrite.reason.offline',
+      empty: 'rewrite.reason.empty',
+      'bad-request': 'rewrite.reason.provider',
+    }
 
     /** One explanation for this call, or `''` for every kind of failure. */
     async function fetchDetail(call, lang, signal, study) {
@@ -948,6 +998,10 @@ window.__ModuleLoader__.load({
       const contextMode = useContextSwitch()
       const [tone, setTone] = React.useState('detailed')
       const [busy, setBusy] = React.useState(false)
+      // After a few seconds the button's label alone stops reassuring anyone.
+      const [slow, setSlow] = React.useState(false)
+      // Set when the reader stops a run, so the card confirms it happened.
+      const [stopped, setStopped] = React.useState(false)
       const [offer, setOffer] = React.useState('')
       const [result, setResult] = React.useState('')
       const [note, setNote] = React.useState('')
@@ -963,8 +1017,17 @@ window.__ModuleLoader__.load({
       const [anchor, setAnchor] = React.useState('')
       const listRef = React.useRef(undefined)
       const abort = React.useRef(undefined)
+      const runTicket = React.useRef(0)
 
       React.useEffect(() => () => abort.current?.abort(), [])
+      React.useEffect(() => {
+        if (!busy) {
+          setSlow(false)
+          return undefined
+        }
+        const id = setTimeout(() => setSlow(true), 6000)
+        return () => clearTimeout(id)
+      }, [busy])
       // The list opens at the newest message, which is what a reader picks from.
       React.useEffect(() => {
         const el = listRef.current
@@ -1067,6 +1130,20 @@ window.__ModuleLoader__.load({
         setPicked(next)
       }
 
+      /** End the run in flight: nothing it answers may land afterwards. */
+      const cancelRun = () => {
+        runTicket.current += 1
+        abort.current?.abort()
+        setBusy(false)
+      }
+
+      /** Cancel, and tell the reader it was their doing rather than a failure. */
+      const stopRun = () => {
+        cancelRun()
+        setStopped(true)
+        setNote('')
+      }
+
       /** Run one rewrite of `rough`; `instruction` carries a follow-up change. */
       const run = (rough, instruction) => {
         const source = rough.trim()
@@ -1074,7 +1151,12 @@ window.__ModuleLoader__.load({
         abort.current?.abort()
         const controller = new AbortController()
         abort.current = controller
+        // A request that was already on its way when the reader moved on must
+        // not drop its answer into the card later.
+        const ticket = runTicket.current + 1
+        runTicket.current = ticket
         setBusy(true)
+        setStopped(false)
         setNote('')
         // A revision is judged against the answer already on screen; if it comes
         // back empty, that answer is still the best one the reader has and must
@@ -1084,24 +1166,25 @@ window.__ModuleLoader__.load({
           { text: source, tone, lang: langNow(), previous: keeping, instruction, context: context.text },
           controller.signal,
         ).then((next) => {
-          if (controller.signal.aborted) return
+          if (controller.signal.aborted || ticket !== runTicket.current) return
           setBusy(false)
-          if (next === '') {
+          if (next.text === '') {
+            const why = t(REWRITE_REASON_KEY[next.reason] ?? 'rewrite.reason.provider')
             if (keeping === '') {
               // Nothing was on screen, so there is nothing to keep: clear and say so.
               setResult('')
-              setNote(t('rewrite.failed'))
+              setNote(t('rewrite.failedWhy', { why }))
               return
             }
             // Keep the version the reader already had, and say the change did not
             // land rather than that the rewrite failed.
             setOffer(rough)
             setResult(keeping)
-            setNote(t('rewrite.failedChange'))
+            setNote(t('rewrite.failedChangeWhy', { why }))
             return
           }
           setOffer(rough)
-          setResult(next)
+          setResult(next.text)
           // Collapsed by default: the change field is opt-in, not the main path.
           setOpen(false)
         })
@@ -1171,11 +1254,21 @@ window.__ModuleLoader__.load({
               'button',
               {
                 type: 'button',
-                className: 'dse-toggle dse-head-go',
-                disabled: busy || text.trim() === '',
-                onClick: () => run(text),
+                // The same control flips to "stop" while a run is in flight: a
+                // reader who is done waiting should not have to hunt for a
+                // second button, and the ticket makes the abandoned answer land
+                // nowhere.
+                className: busy ? 'dse-toggle dse-head-go dse-stop' : 'dse-toggle dse-head-go',
+                disabled: busy ? false : text.trim() === '',
+                onClick: () => {
+                  if (busy) {
+                    stopRun()
+                    return
+                  }
+                  run(text)
+                },
               },
-              busy ? t('rewrite.busy') : result === '' ? t('rewrite.go') : t('rewrite.again'),
+              busy ? t('rewrite.stop') : result === '' ? t('rewrite.go') : t('rewrite.again'),
             ),
           ),
           // "挑选聊天内容" is the picker: choosing it opens the list, choosing 不读
@@ -1310,6 +1403,10 @@ window.__ModuleLoader__.load({
               ctxNote !== '' && h('div', { className: 'dse-warn' }, ctxNote),
             ),
           note !== '' && h('div', { className: 'dse-warn' }, note),
+          // These belong to the run, not to a result: a first attempt has no
+          // result block at all, and that is exactly when Stop is used.
+          busy && slow && h('div', { className: 'dse-foot' }, t('rewrite.slow')),
+          !busy && stopped && h('div', { className: 'dse-foot' }, t('rewrite.stopped')),
           result !== '' &&
             h(
               'div',
@@ -1339,6 +1436,10 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'dse-btn',
                     onClick: () => {
+                      // Reverting is a decision: anything still in flight is no
+                      // longer wanted, and must not reappear once it answers.
+                      cancelRun()
+                      setStopped(false)
                       // Put the words back exactly as they were before adopting.
                       if (offer !== '') accept(offer)
                       setResult('')
@@ -1379,11 +1480,17 @@ window.__ModuleLoader__.load({
                     'button',
                     {
                       type: 'button',
-                      className: 'dse-btn',
-                      disabled: busy || ask.trim() === '',
-                      onClick: () => run(offer === '' ? text : offer, ask.trim()),
+                      className: busy ? 'dse-btn dse-stop' : 'dse-btn',
+                      disabled: busy ? false : ask.trim() === '',
+                      onClick: () => {
+                        if (busy) {
+                          stopRun()
+                          return
+                        }
+                        run(offer === '' ? text : offer, ask.trim())
+                      },
                     },
-                    t('rewrite.apply'),
+                    busy ? t('rewrite.stop') : t('rewrite.apply'),
                   ),
                 ),
               h('div', { className: 'dse-foot' }, t('rewrite.footnote')),
@@ -1661,6 +1768,9 @@ window.__ModuleLoader__.load({
   border:1px solid transparent;border-radius:6px;background:none;padding:2px 7px;
   transition:background-color .12s ease,border-color .12s ease}
 .dse-toggle:hover{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l1)}
+/* Stopping is a secondary action: quieter than the blue "rewrite" label. */
+.dse-toggle.dse-stop{color:var(--dsw-alias-label-secondary)}
+.dse-btn.dse-stop{color:var(--dsw-alias-label-secondary)}
 .dse-toggle:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;border-radius:6px}
 .dse-list{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px}
 .dse-list>li{display:flex;gap:10px;min-width:0;font-size:13px;line-height:20px}
@@ -2383,7 +2493,9 @@ window.__ModuleLoader__.load({
       'rewrite.title': '把这句话写清楚',
       'rewrite.go': '帮我扩写',
       'rewrite.again': '重新扩写',
-      'rewrite.busy': '正在改写…',
+      'rewrite.stop': '停止扩写',
+      'rewrite.slow': '还在改写…内容多的时候会慢一些，最多等一分多钟。',
+      'rewrite.stopped': '已停止，原文没有动。',
       'rewrite.toneAria': '改写篇幅',
       'rewrite.tone.concise': '简短',
       'rewrite.tone.balanced': '适中',
@@ -2394,8 +2506,13 @@ window.__ModuleLoader__.load({
       'rewrite.hideChange': '收起',
       'rewrite.changePlaceholder': '例如：再短一点 / 补上验收标准',
       'rewrite.apply': '改一版',
-      'rewrite.failed': '这次没改成功，你的原文没有动，可以再试一次。',
-      'rewrite.failedChange': '这次改动没成功，上一版还在，可以再试一次。',
+      'rewrite.failedWhy': '这次没改成功：{why}。原文没有动，可以再试一次。',
+      'rewrite.failedChangeWhy': '这次改动没成功：{why}。上一版还在，可以再试一次。',
+      'rewrite.reason.timeout': '等太久了，模型还没写完',
+      'rewrite.reason.noModel': '没有可用的模型',
+      'rewrite.reason.provider': '模型服务这次没回应',
+      'rewrite.reason.offline': '连不上服务',
+      'rewrite.reason.empty': '模型什么都没返回',
       'rewrite.footnote': '只是帮你把话说清楚：采用后才写进输入框，发送仍然由你按。',
       'rewrite.contextLabel': '读取对话',
       'rewrite.context.off': '不读',
@@ -2590,7 +2707,9 @@ window.__ModuleLoader__.load({
       'rewrite.title': 'Say it clearly',
       'rewrite.go': 'Rewrite',
       'rewrite.again': 'Rewrite again',
-      'rewrite.busy': 'Rewriting…',
+      'rewrite.stop': 'Stop',
+      'rewrite.slow': 'Still rewriting… a long conversation takes longer; it gives up after about a minute.',
+      'rewrite.stopped': 'Stopped. Your text is untouched.',
       'rewrite.toneAria': 'Rewrite length',
       'rewrite.tone.concise': 'Short',
       'rewrite.tone.balanced': 'Medium',
@@ -2601,8 +2720,13 @@ window.__ModuleLoader__.load({
       'rewrite.hideChange': 'Hide',
       'rewrite.changePlaceholder': 'e.g. shorter / add how to verify',
       'rewrite.apply': 'Rewrite it',
-      'rewrite.failed': 'That rewrite did not come back. Your text is untouched, so you can try again.',
-      'rewrite.failedChange': 'That change did not come back. Your previous version is still here, so you can try again.',
+      'rewrite.failedWhy': 'That rewrite did not come back: {why}. Your text is untouched, so you can try again.',
+      'rewrite.failedChangeWhy': 'That change did not come back: {why}. Your previous version is still here.',
+      'rewrite.reason.timeout': 'that took too long and the model was still writing',
+      'rewrite.reason.noModel': 'no model is available',
+      'rewrite.reason.provider': 'the model service did not answer',
+      'rewrite.reason.offline': 'the service could not be reached',
+      'rewrite.reason.empty': 'the model returned nothing',
       'rewrite.footnote': 'This only words it better: nothing reaches the draft until you accept, and you still send it.',
       'rewrite.contextLabel': 'Read chat',
       'rewrite.context.off': 'None',
@@ -2750,6 +2874,7 @@ window.__ModuleLoader__.load({
         RewriteCard,
         buildPickContext,
         shouldReadTranscript,
+        rewriteWaitFor,
         historyFor,
         QuestionRewrite,
         questionSeat,

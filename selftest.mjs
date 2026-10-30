@@ -1417,12 +1417,16 @@ hookRefs.length = 0
 }
 globalThis.fetch = async () => ({ ok: true, json: async () => ({ text: '' }) })
 posted.length = 0
-assert.equal(await built.__test.fetchRewrite({ text: '原始的话', tone: 'detailed', lang: 'zh' }), '', 'an empty answer is no rewrite')
+{
+  const empty = await built.__test.fetchRewrite({ text: '原始的话', tone: 'detailed', lang: 'zh' })
+  assert.equal(empty.text, '', 'an empty answer is no rewrite')
+  assert.equal(empty.reason, 'empty', 'and it is reported as an empty answer, not a plain failure')
+}
 const failed = drawBar('原始的话')
 const retry = controlsOf(failed).find((node) => node.type === 'button' && node.props.disabled !== true && textOf(node).includes('扩写'))
 retry.props.onClick()
 const afterFail = await settle('原始的话')
-assert.ok(textOf(afterFail).includes('这次没改成功'), 'a failed rewrite is reported')
+assert.ok(textOf(afterFail).includes('什么都没返回'), 'a failed rewrite says what went wrong')
 assert.ok(!textOf(afterFail).includes('采用'), 'a failed rewrite offers nothing to accept')
 assert.equal(writes.length, 0, 'a failed rewrite never touches the draft')
 
@@ -1529,9 +1533,218 @@ assert.equal(writes.length, 0, 'a failed rewrite never touches the draft')
 globalThis.fetch = async () => {
   throw new Error('offline')
 }
-assert.equal(await built.__test.fetchRewrite({ text: 'x', tone: 'detailed', lang: 'zh' }), '', 'a dead network yields no rewrite')
-assert.equal(await built.__test.fetchRewrite({ text: 'x', tone: 'concise', lang: 'zh' }), '')
+{
+  const offline = await built.__test.fetchRewrite({ text: 'x', tone: 'detailed', lang: 'zh' })
+  assert.equal(offline.text, '', 'a dead network yields no rewrite')
+  assert.equal(offline.reason, 'offline', 'and says the service could not be reached')
+  assert.equal((await built.__test.fetchRewrite({ text: 'x', tone: 'concise', lang: 'zh' })).text, '')
+}
 delete globalThis.fetch
+
+// The Host names the failure; the card repeats it in words the reader can act on.
+{
+  const cases = [
+    ['timeout', '等太久了'],
+    ['no-model', '没有可用的模型'],
+    ['provider', '没回应'],
+    ['offline', '连不上服务'],
+    ['empty', '什么都没返回'],
+  ]
+  for (const [reason, expected] of cases) {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ text: '', reason }) })
+    hookState.length = 0
+    hookRefs.length = 0
+    const tree = drawBar('原始的话')
+    const go = controlsOf(tree).find((node) => node.type === 'button' && textOf(node).includes('扩写'))
+    go.props.onClick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const after = textOf(drawBar('原始的话'))
+    assert.ok(after.includes(expected), `${reason} is phrased for the reader`)
+    assert.ok(after.includes('原文没有动'), `${reason} says the draft is untouched`)
+  }
+  delete globalThis.fetch
+}
+
+// Offline must answer at once; a request that never leaves the machine has no
+// Host timeout to save it, so the browser keeps its own ceiling.
+{
+  assert.equal(built.__test.rewriteWaitFor(''), 70_000, 'an ordinary rewrite waits 70s')
+  assert.equal(built.__test.rewriteWaitFor('x'.repeat(200_001)), 130_000, 'a large one waits 130s')
+
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    return { ok: true, json: async () => ({ text: '不该发生' }) }
+  }
+  const realNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, configurable: true })
+  const offline = await built.__test.fetchRewrite({ text: 'x', tone: 'detailed', lang: 'zh' })
+  assert.equal(offline.reason, 'offline', 'a known-offline browser says so')
+  assert.equal(offline.text, '', 'and returns nothing')
+  assert.equal(calls, 0, 'without even trying the network')
+  if (realNavigator === undefined) delete globalThis.navigator
+  else Object.defineProperty(globalThis, 'navigator', realNavigator)
+
+  globalThis.fetch = async () => {
+    throw Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+  }
+  const timedOut = await built.__test.fetchRewrite({ text: 'x', tone: 'detailed', lang: 'zh' })
+  assert.equal(timedOut.reason, 'timeout', 'a browser timeout is named a timeout')
+
+  // The timer itself: a request that never answers must be aborted, not left
+  // hanging on "正在改写…".
+  globalThis.fetch = (url, init) =>
+    new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+    })
+  const started = Date.now()
+  const hung = await built.__test.fetchRewrite({ text: 'x', tone: 'detailed', lang: 'zh' }, undefined, 30)
+  assert.equal(hung.reason, 'timeout', 'a request that never answers is cut off')
+  assert.ok(Date.now() - started < 2000, 'and it does not wait for the full ceiling')
+  delete globalThis.fetch
+}
+
+// The reader's view of offline: a click answers at once and the button is usable
+// again, instead of sitting on "正在改写…" for a request that never left.
+{
+  const realNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, configurable: true })
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    throw new Error('must not be called while offline')
+  }
+  hookState.length = 0
+  hookRefs.length = 0
+  const bar = drawBar('把那个 bug 修了')
+  buttonNamed(bar, '帮我扩写').props.onClick()
+  const after = await settle('把那个 bug 修了')
+  assert.ok(textOf(after).includes('连不上服务'), 'the reader is told the service is unreachable')
+  assert.ok(!textOf(after).includes('正在改写'), 'the button is not stuck on the busy label')
+  assert.equal(calls, 0, 'nothing was sent')
+  delete globalThis.fetch
+  if (realNavigator === undefined) delete globalThis.navigator
+  else Object.defineProperty(globalThis, 'navigator', realNavigator)
+}
+
+// A request still in flight when the reader reverts must not drop its answer in
+// later: that is the "the rewrite pops up after I already gave up" report.
+{
+  hookState.length = 0
+  hookRefs.length = 0
+  let call = 0
+  let release
+  globalThis.fetch = (url, init) => {
+    call += 1
+    if (call === 1) return Promise.resolve({ ok: true, json: async () => ({ text: '第一版' }) })
+    return new Promise((resolve) => {
+      release = () => resolve({ ok: true, json: async () => ({ text: '迟到的第二版' }) })
+    })
+  }
+
+  buttonNamed(drawBar('原始的话'), '帮我扩写').props.onClick()
+  const first = await settle('原始的话')
+  assert.ok(textOf(first).includes('第一版'), 'the first rewrite landed')
+
+  buttonNamed(first, '让它改').props.onClick()
+  const field = controlsOf(drawBar('原始的话')).find((node) => node.type === 'input')
+  field.props.onChange({ target: { value: '再短一点' } })
+  buttonNamed(drawBar('原始的话'), '改一版').props.onClick()
+
+  const pending = drawBar('原始的话')
+  assert.ok(textOf(pending).includes('第一版'), 'the previous answer stays while the change runs')
+  buttonNamed(pending, '退回').props.onClick()
+
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const after = drawBar('原始的话')
+  assert.ok(!textOf(after).includes('迟到的第二版'), 'a late answer never lands after Revert')
+  assert.ok(!textOf(after).includes('采用'), 'and nothing is offered to accept')
+  delete globalThis.fetch
+}
+
+// While a rewrite runs the same button says Stop; pressing it ends the wait and
+// the answer on its way is never shown.
+{
+  hookState.length = 0
+  hookRefs.length = 0
+  let release
+  globalThis.fetch = (url, init) =>
+    new Promise((resolve) => {
+      init.signal.addEventListener('abort', () => resolve({ ok: false, json: async () => ({}) }))
+      release = () => resolve({ ok: true, json: async () => ({ text: '不该出现的结果' }) })
+    })
+
+  const bar = drawBar('把那个 bug 修了')
+  buttonNamed(bar, '帮我扩写').props.onClick()
+
+  const running = drawBar('把那个 bug 修了')
+  const stop = buttonNamed(running, '停止扩写')
+  assert.ok(stop !== undefined, 'the run button becomes Stop while waiting')
+  assert.equal(stop.props.disabled, false, 'and it is pressable, unlike the old busy label')
+
+  stop.props.onClick()
+  const stopped = drawBar('把那个 bug 修了')
+  assert.ok(textOf(stopped).includes('帮我扩写'), 'stopping returns the button to its normal label')
+  assert.ok(!textOf(stopped).includes('停止扩写'), 'the stop label is gone')
+  assert.ok(textOf(stopped).includes('已停止'), 'and the card confirms the run was stopped')
+  assert.ok(textOf(stopped).includes('原文没有动'), 'reassuring the reader nothing was lost')
+
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const after = drawBar('把那个 bug 修了')
+  assert.ok(!textOf(after).includes('不该出现的结果'), 'the abandoned answer never lands')
+
+  // Starting again must clear the confirmation, or it would look like the new
+  // run had already stopped.
+  buttonNamed(after, '帮我扩写').props.onClick()
+  const restarted = drawBar('把那个 bug 修了')
+  assert.ok(!textOf(restarted).includes('已停止'), 'a new run clears the stopped note')
+  assert.ok(textOf(restarted).includes('停止扩写'), 'and is running again')
+  // Settle the request the assertion above started, so nothing is left pending.
+  buttonNamed(restarted, '停止扩写').props.onClick()
+  delete globalThis.fetch
+}
+
+// The 改一版 button is the same door: while a revision runs it says Stop too.
+{
+  hookState.length = 0
+  hookRefs.length = 0
+  let call = 0
+  let release
+  globalThis.fetch = (url, init) => {
+    call += 1
+    if (call === 1) return Promise.resolve({ ok: true, json: async () => ({ text: '第一版' }) })
+    return new Promise((resolve) => {
+      init.signal.addEventListener('abort', () => resolve({ ok: false, json: async () => ({}) }))
+      release = () => resolve({ ok: true, json: async () => ({ text: '迟到的第二版' }) })
+    })
+  }
+
+  buttonNamed(drawBar('原始的话'), '帮我扩写').props.onClick()
+  const first = await settle('原始的话')
+  assert.ok(textOf(first).includes('第一版'), 'the first rewrite landed')
+
+  buttonNamed(first, '让它改').props.onClick()
+  const field = controlsOf(drawBar('原始的话')).find((node) => node.type === 'input')
+  field.props.onChange({ target: { value: '再短一点' } })
+  buttonNamed(drawBar('原始的话'), '改一版').props.onClick()
+
+  const running = drawBar('原始的话')
+  const stop = buttonNamed(running, '停止扩写')
+  assert.ok(stop !== undefined, 'the revision button turns into Stop')
+  stop.props.onClick()
+
+  const stopped = drawBar('原始的话')
+  assert.ok(textOf(stopped).includes('已停止'), 'stopping a revision is confirmed')
+  assert.ok(textOf(stopped).includes('第一版'), 'the previous rewrite is still on screen')
+  assert.ok(buttonNamed(stopped, '改一版') !== undefined, 'the change button is usable again')
+
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.ok(!textOf(drawBar('原始的话')).includes('迟到的第二版'), 'and the abandoned answer never lands')
+  delete globalThis.fetch
+}
 
 // --- registration -----------------------------------------------------
 // `apply` is what the shell actually runs, so assert what it claims: five

@@ -40,6 +40,12 @@ const MAX_REWRITE_CHARS = 4000
 const MAX_CONTEXT_CHARS = 1_000_000
 const MAX_ID_CHARS = 120
 const TIMEOUT_MS = 20_000
+/** A rewrite carries the conversation, so it gets more room than one step. */
+const REWRITE_TIMEOUT_MS = 60_000
+/** And more still once the context is large enough to slow the model down. */
+const REWRITE_TIMEOUT_LONG_MS = 120_000
+/** Context above this many characters counts as "large". */
+const REWRITE_LONG_CONTEXT_CHARS = 200_000
 /** Prose only: no Markdown, no restating the arguments, no advice. */
 const SYSTEM = {
   zh: '你在给新手解释电脑操作。用一到两句话说明这一步在做什么、会改动什么。不要用 Markdown，不要复述参数原文，不要评价好坏，不要给建议。',
@@ -398,7 +404,7 @@ async function ask(ctx, input, route, signal) {
   // The saved Settings choice wins, then the profile pin, then the chat default.
   // `agentDefaultModel` is optional, so read it late instead of injecting it.
   const selected = selectModel(ctx, input, savedRoute(ctx) ?? route)
-  if (selected === undefined) return ''
+  if (!selected) return ''
   const call = await ctx.llm.prepareCall(
     // Room for the study lines too; `now` still answers in a sentence or two.
     { provider: selected.provider, model: selected.model, maxTokens: input.study === 'now' ? 200 : 320 },
@@ -431,7 +437,9 @@ async function ask(ctx, input, route, signal) {
  */
 async function rewrite(ctx, input, route, signal) {
   const selected = selectModel(ctx, input, savedRoute(ctx) ?? route)
-  if (selected === undefined) return ''
+  // `currentSelection()` answers null when the profile has no model, so this is
+  // falsy rather than strictly undefined.
+  if (!selected) throw Object.assign(new Error('no-model'), { reason: 'no-model' })
   const call = await ctx.llm.prepareCall(
     { provider: selected.provider, model: selected.model, maxTokens: 1200 },
     signal,
@@ -485,15 +493,46 @@ async function handleRewrite(ctx, request, route) {
     return Response.json({ text: '' }, { status: 415 })
   }
   const input = parseRewrite(await request.json().catch(() => undefined))
-  if (input === undefined) return Response.json({ text: '' }, { status: 400 })
-  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(TIMEOUT_MS)])
+  if (input === undefined) return Response.json({ text: '', reason: 'bad-request' }, { status: 400 })
+  // A long conversation is slower to send and slower to answer, so the budget
+  // scales with what the reader asked to attach.
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(rewriteBudget(input.context))])
   let text = ''
+  let reason = null
   try {
     text = cleanRewrite(await rewrite(ctx, input, route, signal))
-  } catch {
-    // A failed rewrite leaves the draft exactly as the reader typed it.
+    // A model that answered nothing is a failure the reader can retry, not a
+    // rewrite that happens to be empty.
+    if (text === '') reason = 'empty'
+  } catch (error) {
+    // A failed rewrite leaves the draft exactly as the reader typed it; the
+    // reason lets the Client say which failure it was.
+    reason = reasonOf(error, signal)
   }
-  return Response.json({ text }, { headers: { 'cache-control': 'no-store' } })
+  return Response.json({ text, reason }, { headers: { 'cache-control': 'no-store' } })
+}
+
+/**
+ * How long a rewrite may take, given how much conversation it carries.
+ * @param context - the transcript the reader attached, possibly empty.
+ * @returns milliseconds.
+ */
+export function rewriteBudget(context) {
+  return String(context ?? '').length > REWRITE_LONG_CONTEXT_CHARS ? REWRITE_TIMEOUT_LONG_MS : REWRITE_TIMEOUT_MS
+}
+
+/**
+ * Why a rewrite produced nothing, as one of the reasons the Client can phrase.
+ * @param error - whatever `rewrite` threw.
+ * @param signal - the request's abort signal.
+ * @returns 'no-model' | 'timeout' | 'provider'.
+ */
+export function reasonOf(error, signal) {
+  if (typeof error?.reason === 'string') return error.reason
+  if (signal?.aborted) return 'timeout'
+  const message = String(error?.message ?? error).toLowerCase()
+  if (message.includes('abort') || message.includes('timeout') || message.includes('timed out')) return 'timeout'
+  return 'provider'
 }
 
 /**

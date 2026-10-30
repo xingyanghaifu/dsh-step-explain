@@ -1,7 +1,7 @@
 // Self-check for dsh-step-explain's Host half. No dependency, no network:
 //   node hostselftest.mjs
 import assert from 'node:assert/strict'
-import { apply, clean, cleanRewrite, parseInput, parseRewrite, transcriptOf } from './index.js'
+import { apply, clean, cleanRewrite, parseInput, parseRewrite, reasonOf, rewriteBudget, transcriptOf } from './index.js'
 
 // --- parsing at the wire ---------------------------------------------
 assert.deepEqual(parseInput({ name: 'read', argsRaw: '{"file_path":"a"}' }), {
@@ -348,7 +348,7 @@ ctx.llm.prepareCall = async (config) => {
 }
 const rewritten = await postRewrite({ text: '  把那个 bug 修了  ', tone: 'concise', lang: 'zh' })
 assert.equal(rewritten.status, 200)
-assert.deepEqual(await rewritten.json(), { text: '改写后的指令。' })
+assert.deepEqual(await rewritten.json(), { text: '改写后的指令。', reason: null })
 assert.equal(rewriteSeen.maxTokens, 1200, 'a rewrite gets room for a whole instruction')
 assert.equal(rewriteSeen.provider, 'p')
 assert.ok(rewritePrompt?.system.includes('尽量短'), 'the concise tone reaches the prompt')
@@ -477,7 +477,31 @@ ctx.llm.prepareCall = async () => {
 }
 const rewriteFailed = await postRewrite({ text: '修 bug' })
 assert.equal(rewriteFailed.status, 200)
-assert.deepEqual(await rewriteFailed.json(), { text: '' })
+assert.deepEqual(await rewriteFailed.json(), { text: '', reason: 'provider' })
+
+// The reason classifier is what the Client phrases; pin its three answers.
+{
+  assert.equal(reasonOf(Object.assign(new Error('x'), { reason: 'no-model' })), 'no-model', 'a typed reason wins')
+  assert.equal(reasonOf(new Error('no route')), 'provider', 'an unknown failure is the service')
+  const aborted = new AbortController()
+  aborted.abort()
+  assert.equal(reasonOf(new Error('whatever'), aborted.signal), 'timeout', 'an aborted request is a timeout')
+  assert.equal(reasonOf(new Error('request timed out'), undefined), 'timeout', 'a timeout message is a timeout')
+
+  assert.equal(rewriteBudget(''), 60_000, 'an ordinary rewrite gets a minute')
+  assert.equal(rewriteBudget('x'.repeat(200_000)), 60_000, 'right at the line it is still the ordinary budget')
+  assert.equal(rewriteBudget('x'.repeat(200_001)), 120_000, 'a large transcript gets two')
+}
+
+// A profile with no model answers with its own reason instead of crashing.
+{
+  const saved = ctx.agentDefaultModel
+  ctx.agentDefaultModel = { currentSelection: () => null }
+  const noModel = await postRewrite({ text: '修 bug' })
+  assert.equal(noModel.status, 200)
+  assert.deepEqual(await noModel.json(), { text: '', reason: 'no-model' }, 'no model is its own reason')
+  ctx.agentDefaultModel = saved
+}
 
 // --- the saved model choice -------------------------------------------
 // The settings route reads and writes the profile patch through configEditor,
