@@ -1668,4 +1668,83 @@ assert.ok(
   built.__test.setContext('off')
 }
 
+// --- the fixes that keep the picker honest -----------------------------
+// A session switch must not carry ticks across; the Host must not be asked for
+// a transcript the reader said not to read; an oversized pick must say so.
+{
+  const history = {
+    messages: [
+      { who: 'user', text: '会话甲的第一条' },
+      { who: 'assistant', text: '会话甲的回复' },
+    ],
+  }
+  const own = built.__test.buildPickContext({
+    mode: 'full',
+    picked: { 's1#0:user': false },
+    history,
+    fallbackItems: [],
+    scope: 's1',
+  })
+  assert.equal(own.chosen.length, 1, 'a tick turned off in its own session stays off')
+
+  const other = built.__test.buildPickContext({
+    mode: 'full',
+    picked: { 's1#0:user': false },
+    history,
+    fallbackItems: [],
+    scope: 's2',
+  })
+  assert.equal(other.chosen.length, 2, 'another session never inherits that tick')
+  assert.ok(
+    other.items.every((item) => item.key.startsWith('s2#')),
+    'keys are scoped to the session that produced them',
+  )
+
+  assert.equal(built.__test.shouldReadTranscript('s1', false), false, 'do-not-read never fetches')
+  assert.equal(built.__test.shouldReadTranscript('s1', true), true, 'asking to read does fetch')
+  assert.equal(built.__test.shouldReadTranscript('', true), false, 'no session, nothing to fetch')
+  assert.equal(built.__test.shouldReadTranscript(undefined, true), false, 'a missing session is not fetched')
+
+  const loaded = { sessionId: 's1', history: { messages: [{ who: 'user', text: '甲的对话' }] } }
+  assert.equal(built.__test.historyFor(loaded, 's1'), loaded.history, 'a transcript is reused for its own session')
+  assert.equal(built.__test.historyFor(loaded, 's2'), undefined, 'and never for a different one')
+  assert.equal(built.__test.historyFor(undefined, 's1'), undefined, 'nothing loaded means nothing to reuse')
+
+  // The bar must survive being handed a session: that is what wires the card to
+  // the transcript fetch and to the session-scoped keys.
+  built.__test.setContext('off')
+  hookState.length = 0
+  hookRefs.length = 0
+  const withSession = mount(
+    built.__test.RewriteBar({
+      t,
+      sessionId: 's1',
+      useInput: (select) => select({ draft: '草稿' }),
+      useChat: (select) => select({ nodes: { values: () => [] }, legacy: { nodes: [] } }),
+      inputActions,
+    }),
+  )
+  assert.ok(textOf(withSession).includes('把这句话写清楚'), 'the bar still renders with a session id')
+}
+
+// Over the Host's limit the card says so instead of pretending it all goes out.
+{
+  built.__test.setContext('full')
+  hookState.length = 0
+  hookRefs.length = 0
+  const long = 'x'.repeat(1_000_100)
+  const tree = mount(
+    built.__test.RewriteCard({
+      t,
+      dock: 'dse-dock',
+      text: '草稿',
+      accept: () => {},
+      background: () => [],
+      history: { messages: [{ who: 'user', text: long }], contextWindow: 64000 },
+    }),
+  )
+  assert.ok(textOf(tree).includes('100 万字符'), 'a payload over the Host limit is called out')
+  built.__test.setContext('off')
+}
+
 console.log('dsh-step-explain: all self-checks passed')

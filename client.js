@@ -591,22 +591,40 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** The Host transcript for this session, or undefined while unknown. */
-    function useChatHistory(sessionId) {
-      const [history, setHistory] = React.useState(undefined)
+    /** Whether this bar may ask the Host for a transcript at all. */
+    function shouldReadTranscript(sessionId, enabled) {
+      return enabled === true && typeof sessionId === 'string' && sessionId !== ''
+    }
+
+    /**
+     * The Host transcript for this session, or undefined while unknown.
+     *
+     * `enabled` is false while the reader has picked "do not read": the whole
+     * transcript must not be pulled off the Host just because the composer
+     * mounted.
+     */
+    /** The transcript only counts for the session it was actually read from. */
+    function historyFor(loaded, sessionId) {
+      return loaded !== undefined && loaded.sessionId === sessionId ? loaded.history : undefined
+    }
+
+    function useChatHistory(sessionId, enabled) {
+      // Stored with its session: after a switch the previous conversation must
+      // not stand in for the new one while the new request is in flight.
+      const [loaded, setLoaded] = React.useState(undefined)
       React.useEffect(() => {
-        if (typeof sessionId !== 'string' || sessionId === '') return undefined
+        if (!shouldReadTranscript(sessionId, enabled)) return undefined
         const controller = new AbortController()
         let live = true
         void fetchChat(sessionId, controller.signal).then((answer) => {
-          if (live && answer !== undefined) setHistory(answer)
+          if (live && answer !== undefined) setLoaded({ sessionId, history: answer })
         })
         return () => {
           live = false
           controller.abort()
         }
-      }, [sessionId])
-      return history
+      }, [sessionId, enabled])
+      return historyFor(loaded, sessionId)
     }
 
     /**
@@ -711,6 +729,8 @@ window.__ModuleLoader__.load({
     const CONTEXT_MODES = ['off', 'full']
     /** Character budget per mode; `Infinity` means "the reader decides". */
     const CONTEXT_BUDGET = { full: Infinity }
+    /** Mirrors the Host's MAX_CONTEXT_CHARS; over it the Host keeps the head. */
+    const CONTEXT_MAX_CHARS = 1_000_000
 
     let contextMode = readContext()
     const contextListeners = new Set()
@@ -886,7 +906,7 @@ window.__ModuleLoader__.load({
      * what the UI has loaded, so it is the fallback. The recommendation follows
      * the model's own window when the Host reports one.
      */
-    function buildPickContext({ mode, picked, history, fallbackItems }) {
+    function buildPickContext({ mode, picked, history, fallbackItems, scope }) {
       if (mode === 'off') {
         return { text: '', items: [], auto: new Set(), budget: 0, chars: 0, chosen: [], recommended: 0, window: undefined, whole: false }
       }
@@ -896,7 +916,9 @@ window.__ModuleLoader__.load({
           ? fromHost.map((each, index) => ({
               who: each.who,
               text: each.text,
-              key: `${index}:${each.who}`,
+              // Keys are scoped to the session: switching sessions must not
+              // carry the previous conversation's ticks over by index.
+              key: scope === undefined ? `${index}:${each.who}` : `${scope}#${index}:${each.who}`,
               line: `${each.who === 'user' ? '用户' : '助手'}\n${each.text}`,
             }))
           : fallbackItems
@@ -922,7 +944,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function RewriteCard({ text, accept, background, history, dock, t }) {
+    function RewriteCard({ text, accept, background, history, dock, t, sessionId }) {
       const contextMode = useContextSwitch()
       const [tone, setTone] = React.useState('detailed')
       const [busy, setBusy] = React.useState(false)
@@ -962,10 +984,13 @@ window.__ModuleLoader__.load({
             mode: contextMode,
             picked,
             history,
+            scope: sessionId,
             fallbackItems:
               typeof background === 'function' ? background(CONTEXT_BUDGET[contextMode]).items : [],
           }),
-        [contextMode, background, text, picked, history],
+        // `text` is the draft and has nothing to do with the list; keeping it
+        // here rebuilt the whole selection on every keystroke.
+        [contextMode, background, picked, history, sessionId],
       )
 
 
@@ -1173,6 +1198,8 @@ window.__ModuleLoader__.load({
                           chars: context.chars,
                         }),
                 ),
+              context.chars > CONTEXT_MAX_CHARS &&
+                h('div', { className: 'dse-warn' }, t('rewrite.contextOverflow')),
               context.chars > context.recommended &&
                 h('div', { className: 'dse-advice' }, t(
                   context.window === undefined ? 'rewrite.contextLong' : 'rewrite.contextLongWindow',
@@ -1372,20 +1399,26 @@ window.__ModuleLoader__.load({
      */
     function RewriteBar({ useInput, useChat, inputActions, t, sessionId }) {
       const draft = useInput((input) => input.draft)
-      const history = useChatHistory(sessionId)
+      const mode = useContextSwitch()
+      // Only fetch the transcript once the reader has actually asked to read it.
+      const history = useChatHistory(sessionId, mode !== 'off')
       // The node map, not `legacy.nodes`: the legacy projection stores each
       // node's `data` payload without its `kind`, so it cannot tell a user
       // message from an assistant step. `nodes.values()` is the same source the
       // step list and the approval dialog already read.
       const nodes = useChat((snapshot) => snapshot.nodes.values())
+      // A fresh arrow here would invalidate the card's context memo on every
+      // keystroke, which is what made long conversations lag.
+      const background = React.useMemo(() => (maxChars) => excerptOf(nodes, maxChars), [nodes])
       return h(RewriteCard, {
         text: draft,
         history,
         accept: inputActions.setDraft,
         // The mode decides the budget, so the panel asks for what it will send.
-        background: (maxChars) => excerptOf(nodes, maxChars),
+        background,
         dock: 'dse-dock',
         t,
+        sessionId,
       })
     }
 
@@ -2376,6 +2409,7 @@ window.__ModuleLoader__.load({
       'rewrite.contextLongWindow': '这次大约 {chars} 字。你选的模型窗口约 {window} token，建议不超过 {max} 字；超了这次扩写可能失败。',
       'rewrite.contextScope': '列表里只有聊天中已经加载出来的部分；想选更早的内容，先把聊天往上滚一滚，再打开这里。',
       'rewrite.contextScopeWhole': '列表是整段对话，包含已经被压缩掉、模型已经看不到的早期消息。',
+      'rewrite.contextOverflow': '内容超过 100 万字符，服务端只会保留前 100 万，超出的部分不会发送。',
       'rewrite.contextPickAll': '全选',
       'rewrite.contextJumpBottom': '回到最新一条',
       'rewrite.contextPickNone': '清空',
@@ -2582,6 +2616,7 @@ window.__ModuleLoader__.load({
       'rewrite.contextLongWindow': 'About {chars} characters. The model you picked has a window of roughly {window} tokens, so keep it under {max} characters; past that the rewrite may fail.',
       'rewrite.contextScope': 'Only the part of the chat already loaded is listed. To pick older messages, scroll the chat up first, then open this list.',
       'rewrite.contextScopeWhole': 'The list is the whole conversation, including early messages that compaction already hid from the model.',
+      'rewrite.contextOverflow': 'Over 1,000,000 characters: the server keeps the first million and drops the rest.',
       'rewrite.contextPickAll': 'Tick all',
       'rewrite.contextJumpBottom': 'Jump to the newest',
       'rewrite.contextPickNone': 'Clear',
@@ -2714,6 +2749,8 @@ window.__ModuleLoader__.load({
         RewriteBar,
         RewriteCard,
         buildPickContext,
+        shouldReadTranscript,
+        historyFor,
         QuestionRewrite,
         questionSeat,
         writeAnswer,
