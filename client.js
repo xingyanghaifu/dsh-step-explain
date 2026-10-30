@@ -1002,6 +1002,9 @@ window.__ModuleLoader__.load({
       const [slow, setSlow] = React.useState(false)
       // Set when the reader stops a run, so the card confirms it happened.
       const [stopped, setStopped] = React.useState(false)
+      // The list is the tall part of the panel; once the picking is done it can
+      // be folded away so it stops covering the composer.
+      const [listOpen, setListOpen] = React.useState(true)
       const [offer, setOffer] = React.useState('')
       const [result, setResult] = React.useState('')
       const [note, setNote] = React.useState('')
@@ -1277,10 +1280,13 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'dse-context-body' },
-              h('div', { className: 'dse-context-hint' }, t(`rewrite.contextHint.${contextMode}`)),
+              listOpen && h('div', { className: 'dse-context-hint' }, t(`rewrite.contextHint.${contextMode}`)),
               h(
                 'div',
-                { className: 'dse-context-count' },
+                { className: 'dse-context-countrow' },
+                h(
+                  'span',
+                  { className: 'dse-context-count' },
                   context.items.length === 0
                     ? t('rewrite.contextEmpty')
                     : context.chosen.length === 0
@@ -1291,6 +1297,18 @@ window.__ModuleLoader__.load({
                           chars: context.chars,
                         }),
                 ),
+                context.items.length > 0 &&
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dse-context-fold',
+                      'aria-expanded': listOpen,
+                      onClick: () => setListOpen(!listOpen),
+                    },
+                    listOpen ? t('rewrite.contextCollapse') : t('rewrite.contextExpand'),
+                  ),
+              ),
               context.chars > CONTEXT_MAX_CHARS &&
                 h('div', { className: 'dse-warn' }, t('rewrite.contextOverflow')),
               context.chars > context.recommended &&
@@ -1298,9 +1316,9 @@ window.__ModuleLoader__.load({
                   context.window === undefined ? 'rewrite.contextLong' : 'rewrite.contextLongWindow',
                   { chars: context.chars, max: context.recommended, window: context.window },
                 )),
-              context.items.length > 0 &&
+              listOpen && context.items.length > 0 &&
                 h('div', { className: 'dse-context-note' }, t('rewrite.contextPickHint')),
-              context.items.length > 0 &&
+              listOpen && context.items.length > 0 &&
                 h(
                   'div',
                   { className: 'dse-context-listwrap' },
@@ -1348,7 +1366,7 @@ window.__ModuleLoader__.load({
                     '↓',
                   ),
                 ),
-              context.items.length > 0 &&
+              listOpen && context.items.length > 0 &&
                 h(
                   'div',
                   { className: 'dse-context-actions' },
@@ -1723,6 +1741,13 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2)}
 .dse-context-count{margin-top:4px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);
   font-variant-numeric:tabular-nums}
+.dse-context-countrow{display:flex;align-items:center;gap:8px;margin-top:4px}
+.dse-context-countrow .dse-context-count{margin-top:0;flex:1;min-width:0}
+.dse-context-fold{flex:none;cursor:pointer;font:inherit;font-size:12px;line-height:18px;
+  color:var(--dsw-alias-brand-primary);border:1px solid transparent;border-radius:6px;
+  background:none;padding:1px 6px}
+.dse-context-fold:hover{background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l1)}
+.dse-context-fold:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .dse-context-body{margin-top:2px}
 .dse-context-note{margin-top:2px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 /* The per-message picker: a reader can drop a line they would rather not send,
@@ -2520,6 +2545,8 @@ window.__ModuleLoader__.load({
       'rewrite.contextHint.off': '只发送你输入框里的那句话，不读取对话内容。',
       'rewrite.contextHint.full': '下面是整段对话，默认全部勾选；可以逐段取消，不设字数上限。',
       'rewrite.contextCountOpen': '已选 {count}/{total} 段，约 {chars} 字（不限字数）。',
+      'rewrite.contextCollapse': '收起',
+      'rewrite.contextExpand': '展开',
       'rewrite.contextEmpty': '当前对话还没有可读取的消息。',
       'rewrite.contextPickHint': '逐段勾选要发送的内容，可以不连续；未勾选的一律不发送。',
       'rewrite.contextLong': '这次大约 {chars} 字，偏长：超过模型能读的长度时，这次扩写会失败。建议只勾最近几段，或分几次扩写。',
@@ -2734,6 +2761,8 @@ window.__ModuleLoader__.load({
       'rewrite.contextHint.off': 'Only the sentence in your composer is sent; the conversation is not read.',
       'rewrite.contextHint.full': 'The whole conversation is listed below, ticked by default; untick anything, with no character cap.',
       'rewrite.contextCountOpen': '{count}/{total} selected, about {chars} characters (no cap).',
+      'rewrite.contextCollapse': 'Collapse',
+      'rewrite.contextExpand': 'Expand',
       'rewrite.contextEmpty': 'This conversation has no messages to read yet.',
       'rewrite.contextPickHint': 'Tick the passages to send; they need not be adjacent. Anything unticked is never sent.',
       'rewrite.contextLong': 'About {chars} characters, which is a lot: a request past what the model can read will fail. Tick fewer recent passages, or split the rewrite into a few runs.',

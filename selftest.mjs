@@ -1746,6 +1746,35 @@ delete globalThis.fetch
   delete globalThis.fetch
 }
 
+// The picker can be folded away: the count stays, the tall list and its buttons
+// go, so the panel stops covering the composer once the picking is done.
+{
+  built.__test.setContext('full')
+  hookState.length = 0
+  hookRefs.length = 0
+  chatNodes = [
+    { kind: 'user', visibility: 'visible', data: { role: 'user', content: [{ type: 'text', text: '第一段话' }] } },
+    { kind: 'assistant-step', visibility: 'visible', data: { blocks: [{ kind: 'text', text: '第二段话' }] } },
+  ]
+  const expanded = drawBar('草稿')
+  assert.ok(textOf(expanded).includes('第一段话'), 'the list is open by default')
+  assert.ok(buttonNamed(expanded, '收起') !== undefined, 'and offers to fold')
+
+  buttonNamed(expanded, '收起').props.onClick()
+  const folded = drawBar('草稿')
+  assert.ok(!textOf(folded).includes('第一段话'), 'folding hides the list')
+  assert.ok(textOf(folded).includes('已选'), 'the count stays visible')
+  assert.ok(buttonNamed(folded, '展开') !== undefined, 'and the way back is offered')
+  assert.ok(buttonNamed(folded, '全选') === undefined, 'the bulk actions fold with the list')
+
+  buttonNamed(folded, '展开').props.onClick()
+  const reopened = drawBar('草稿')
+  assert.ok(textOf(reopened).includes('第一段话'), 'expanding brings the list back')
+  assert.ok(buttonNamed(reopened, '全选') !== undefined, 'and the actions with it')
+  chatNodes = []
+  built.__test.setContext('off')
+}
+
 // --- registration -----------------------------------------------------
 // `apply` is what the shell actually runs, so assert what it claims: five
 // read-only surfaces plus the new Settings page, and nothing that answers an
