@@ -142,13 +142,20 @@ export function parseInput(body) {
   if (typeof name !== 'string' || name.trim() === '') return undefined
   if (argsRaw !== undefined && typeof argsRaw !== 'string') return undefined
   if (model !== undefined && routeOf(model) === undefined) return undefined
-  if (study !== undefined && (typeof study !== 'string' || STUDY[study] === undefined)) return undefined
+  if (study !== undefined) {
+    if (Array.isArray(study)) {
+      if (study.length === 0 || !study.every((part) => typeof part === 'string' && STUDY[part] !== undefined)) return undefined
+    } else if (typeof study !== 'string' || STUDY[study] === undefined) {
+      return undefined
+    }
+  }
   return {
     name: name.slice(0, MAX_ID_CHARS),
     argsRaw: (argsRaw ?? '').slice(0, MAX_ARGS_CHARS),
     lang: typeof lang === 'string' && lang.startsWith('zh') ? 'zh' : 'en',
-    // The study level shapes the prompt; an absent one keeps the short answer.
-    study: study ?? 'now',
+    // The study parts shape the prompt; always a list, so callers need one shape.
+    // A legacy single value widens to what that value used to include.
+    study: study === undefined ? ['now'] : Array.isArray(study) ? study : ['now', 'why', 'plan'].slice(0, ['now', 'why', 'plan'].indexOf(study) + 1),
     ...(model === undefined ? {} : { model: routeOf(model) }),
   }
 }
@@ -407,7 +414,7 @@ async function ask(ctx, input, route, signal) {
   if (!selected) return ''
   const call = await ctx.llm.prepareCall(
     // Room for the study lines too; `now` still answers in a sentence or two.
-    { provider: selected.provider, model: selected.model, maxTokens: input.study === 'now' ? 200 : 320 },
+    { provider: selected.provider, model: selected.model, maxTokens: input.study.length === 1 && input.study[0] === 'now' ? 200 : 320 },
     signal,
   )
   const messages = [
@@ -418,7 +425,7 @@ async function ask(ctx, input, route, signal) {
   ]
   // The level's extra sentence is appended to the same system prompt, so one
   // request still produces the whole explanation at that level.
-  const extra = STUDY[input.study]?.[input.lang] ?? ''
+  const extra = input.study.map((part) => STUDY[part]?.[input.lang] ?? '').filter((line) => line !== '').join('\n')
   const system = extra === '' ? SYSTEM[input.lang] : `${SYSTEM[input.lang]}\n${extra}`
   let text = ''
   for await (const chunk of call.stream({ ...call.config, messages, system, signal })) {

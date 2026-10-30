@@ -8,12 +8,12 @@ assert.deepEqual(parseInput({ name: 'read', argsRaw: '{"file_path":"a"}' }), {
   name: 'read',
   argsRaw: '{"file_path":"a"}',
   lang: 'en',
-  study: 'now',
+  study: ['now'],
 })
 assert.deepEqual(parseInput({ name: 'read', argsRaw: 'x', lang: 'zh-CN' }).lang, 'zh')
 // The study level reaches the Host and is validated, so the prompt can follow it.
-assert.equal(parseInput({ name: 'read', argsRaw: 'x', study: 'plan' }).study, 'plan', 'a known level is kept')
-assert.equal(parseInput({ name: 'read', argsRaw: 'x', study: 'why' }).study, 'why')
+assert.deepEqual(parseInput({ name: 'read', argsRaw: 'x', study: 'plan' }).study, ['now', 'why', 'plan'], 'a legacy level widens to every part')
+assert.deepEqual(parseInput({ name: 'read', argsRaw: 'x', study: 'why' }).study, ['now', 'why'])
 assert.equal(parseInput({ name: 'read', argsRaw: 'x', study: 'nonsense' }), undefined, 'an unknown level is refused')
 assert.deepEqual(parseInput({ name: 'read', lang: 'fr' }).lang, 'en', 'an unknown language falls back to English')
 assert.equal(parseInput({ name: 'read' }).argsRaw, '', 'missing arguments are an empty string')

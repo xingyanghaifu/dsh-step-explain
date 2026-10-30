@@ -429,25 +429,48 @@ window.__ModuleLoader__.load({
      * does). Only the explanation changes — never the approval itself.
      */
     const LEVELS = ['rule', 'model', 'full']
-    /** Saved level; anything unreadable means the plain rule text. */
+    /** Old single choices, widened to the layers they used to imply. */
+    const DETAIL_LEGACY = { rule: ['rule'], model: ['rule', 'model'], full: ['rule', 'model', 'full'] }
+    /** Saved layers; all three may be on at once. */
     let detailLevel = readDetail()
     const detailListeners = new Set()
 
-    /** Read the stored level; storage can be disabled, so failure means `rule`. */
+    /**
+     * Read a stored layer list. New values are JSON arrays; old values are one
+     * of the single choices and widen to what that choice used to include.
+     */
+    function parseLayers(raw, allowed, legacy, fallback) {
+      if (typeof raw === 'string' && raw !== '') {
+        if (raw.startsWith('[')) {
+          try {
+            const parsed = JSON.parse(raw)
+            if (Array.isArray(parsed)) return allowed.filter((each) => parsed.includes(each))
+          } catch {
+            // Fall through to the legacy shape.
+          }
+        }
+        if (Array.isArray(legacy?.[raw])) return legacy[raw].slice()
+      }
+      return fallback.slice()
+    }
+
+    /** Read the stored layers; storage can be disabled, so failure means the default. */
     function readDetail() {
       try {
-        const raw = globalThis.localStorage?.getItem(DETAIL_KEY)
-        return LEVELS.includes(raw) ? raw : 'rule'
+        return parseLayers(globalThis.localStorage?.getItem(DETAIL_KEY), LEVELS, DETAIL_LEGACY, ['rule'])
       } catch {
-        return 'rule'
+        return ['rule']
       }
     }
 
-    /** Store the level for every surface; a blocked write only loses the memory. */
+    /** Store the layers for every surface; a blocked write only loses the memory. */
     function setDetail(next) {
-      detailLevel = LEVELS.includes(next) ? next : 'rule'
+      const list = Array.isArray(next)
+        ? LEVELS.filter((each) => next.includes(each))
+        : DETAIL_LEGACY[next] ?? ['rule']
+      detailLevel = list
       try {
-        globalThis.localStorage?.setItem(DETAIL_KEY, detailLevel)
+        globalThis.localStorage?.setItem(DETAIL_KEY, JSON.stringify(detailLevel))
       } catch {
         // Private mode or a full quota: the level lasts for this page.
       }
@@ -469,25 +492,33 @@ window.__ModuleLoader__.load({
      * plugin is to say what a step is for and what follows, and a reader who
      * wants less can turn it down. An unreadable value falls back to that.
      */
-    const STUDY_DEFAULT = 'plan'
+    const STUDY_DEFAULT = ['now', 'why', 'plan']
+    /** Old single choices widened to the parts they used to include. */
+    const STUDY_LEGACY = {
+      now: ['now'],
+      why: ['now', 'why'],
+      plan: ['now', 'why', 'plan'],
+    }
     let studyLevel = readStudy()
     const studyListeners = new Set()
 
-    /** Read the stored study level; a blocked read means the default. */
+    /** Read the stored study parts; a blocked read means the default. */
     function readStudy() {
       try {
-        const raw = globalThis.localStorage?.getItem(STUDY_KEY)
-        return STUDY_LEVELS.includes(raw) ? raw : STUDY_DEFAULT
+        return parseLayers(globalThis.localStorage?.getItem(STUDY_KEY), STUDY_LEVELS, STUDY_LEGACY, STUDY_DEFAULT)
       } catch {
-        return STUDY_DEFAULT
+        return STUDY_DEFAULT.slice()
       }
     }
 
-    /** Store the study level for every surface; a blocked write only loses it. */
+    /** Store the study parts for every surface; a blocked write only loses it. */
     function setStudy(next) {
-      studyLevel = STUDY_LEVELS.includes(next) ? next : STUDY_DEFAULT
+      const list = Array.isArray(next)
+        ? STUDY_LEVELS.filter((each) => next.includes(each))
+        : STUDY_LEGACY[next] ?? STUDY_DEFAULT
+      studyLevel = list
       try {
-        globalThis.localStorage?.setItem(STUDY_KEY, studyLevel)
+        globalThis.localStorage?.setItem(STUDY_KEY, JSON.stringify(studyLevel))
       } catch {
         // Private mode or a full quota: the level lasts for this page.
       }
@@ -504,10 +535,16 @@ window.__ModuleLoader__.load({
       return level
     }
 
-    /** Which of `now`/`why`/`plan` a level includes, in reading order. */
+    /** Which of `now`/`why`/`plan` a value includes, in reading order. */
     function studyParts(level) {
+      if (Array.isArray(level)) return STUDY_LEVELS.filter((each) => level.includes(each))
       const upto = STUDY_LEVELS.indexOf(level)
       return STUDY_LEVELS.slice(0, upto === -1 ? 1 : upto + 1)
+    }
+
+    /** Flip one layer in a canonical-ordered list. */
+    function toggleLayer(list, key, order) {
+      return list.includes(key) ? list.filter((each) => each !== key) : order.filter((each) => each === key || list.includes(each))
     }
 
     /**
@@ -516,7 +553,8 @@ window.__ModuleLoader__.load({
      * profile itself.
      */
     function detailPayload(call, lang, study) {
-      return { name: call.name, argsRaw: call.argsRaw, lang, study }
+      // Always a list on the wire, so the Host has one shape to validate.
+      return { name: call.name, argsRaw: call.argsRaw, lang, study: studyParts(study) }
     }
 
     /** Active language for the model prompt; `apply` binds this to the locale service. */
@@ -2122,11 +2160,10 @@ window.__ModuleLoader__.load({
                 {
                   key: each,
                   type: 'button',
-                  className: each === level ? 'dse-btn dse-btn-on' : 'dse-btn',
-                  'aria-pressed': each === level,
-                  // The row title already says what these pick, so the button
-                  // carries only the level name.
-                  onClick: () => setDetail(each),
+                  className: level.includes(each) ? 'dse-btn dse-btn-on' : 'dse-btn',
+                  'aria-pressed': level.includes(each),
+                  // Independent switches: any combination can be on.
+                  onClick: () => setDetail(toggleLayer(level, each, LEVELS)),
                 },
                 t(`level.${each}`),
               ),
@@ -2137,7 +2174,7 @@ window.__ModuleLoader__.load({
 
         row(
           t('page.study.title'),
-          t(`page.study.body.${study}`),
+          t(`page.study.body.${study.length === STUDY_LEVELS.length ? 'plan' : study[0] ?? 'now'}`),
           h(
             'div',
             { className: 'dse-levels', role: 'group', 'aria-label': t('page.study.title') },
@@ -2147,9 +2184,9 @@ window.__ModuleLoader__.load({
                 {
                   key: each,
                   type: 'button',
-                  className: each === study ? 'dse-btn dse-btn-on' : 'dse-btn',
-                  'aria-pressed': each === study,
-                  onClick: () => setStudy(each),
+                  className: study.includes(each) ? 'dse-btn dse-btn-on' : 'dse-btn',
+                  'aria-pressed': study.includes(each),
+                  onClick: () => setStudy(toggleLayer(study, each, STUDY_LEVELS)),
                 },
                 t(`study.${each}`),
               ),
@@ -2287,9 +2324,9 @@ window.__ModuleLoader__.load({
                 {
                   key: each,
                   type: 'button',
-                  className: level === each ? 'dse-btn dse-btn-on' : 'dse-btn',
-                  'aria-pressed': level === each,
-                  onClick: () => setDetail(each),
+                  className: level.includes(each) ? 'dse-btn dse-btn-on' : 'dse-btn',
+                  'aria-pressed': level.includes(each),
+                  onClick: () => setDetail(toggleLayer(level, each, LEVELS)),
                 },
                 t(`detail.${each}`),
               ),
@@ -2300,11 +2337,11 @@ window.__ModuleLoader__.load({
         // same explanation the chat surfaces do, from one shared component. The
         // "model notes" level forces a model explanation even when the global
         // switch is off; the switch turns it on for this dialog too.
-        h(Explanation, { info, t, force: level === 'model' }),
+        (level.includes('rule') || level.includes('model')) && h(Explanation, { info, t, force: level.includes('model') }),
         command !== '' && h('code', { className: 'dse-code' }, command),
         info.danger && h('div', { className: 'dse-warn' }, t('approval.danger')),
         // `full` spells out the dialog itself, on top of the rule text above.
-        level === 'full' && h(FullExplanation, { t, info }),
+        level.includes('full') && h(FullExplanation, { t, info }),
         h('div', { className: 'dse-line' }, t('approval.allow', { effect: t(`ok.${info.cat}`) })),
         h('div', { className: 'dse-line' }, t('approval.deny', { effect: t(`no.${info.cat}`) })),
         // Only claim a model wrote something when one actually did.

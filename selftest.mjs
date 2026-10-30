@@ -257,7 +257,7 @@ assert.ok(!textOf(summary).includes('影响：'), 'summary starts collapsed')
     Object.keys(asked[0].body).every((key) => ['name', 'argsRaw', 'lang', 'study'].includes(key)),
     'no session content leaves the browser',
   )
-  assert.equal(asked[0].body.study, 'plan', 'the study level rides along, so the model writes at the same depth')
+  assert.deepEqual(asked[0].body.study, ['now', 'why', 'plan'], 'the enabled study parts ride along, so the model writes at the same depth')
   // Once the answer arrives it replaces the rule explanation, while the impact
   // and undo lines — the facts the reader decides on — stay local.
   const replaced = textOf(draw())
@@ -532,14 +532,14 @@ assert.deepEqual(detailPayload({ name: 'read', argsRaw: '{"file_path":"a"}' }, '
   name: 'read',
   argsRaw: '{"file_path":"a"}',
   lang: 'zh',
-  study: 'why',
+  study: ['now', 'why'],
 })
-assert.deepEqual(detailPayload({ name: '', argsRaw: '' }, 'en', 'now'), { name: '', argsRaw: '', lang: 'en', study: 'now' })
+assert.deepEqual(detailPayload({ name: '', argsRaw: '' }, 'en', 'now'), { name: '', argsRaw: '', lang: 'en', study: ['now'] })
 
 // The model is never in the request: the Host reads the saved profile itself.
 // Even handed a model pair by mistake, the payload carries only the call.
 const withModel = detailPayload({ name: 'read', argsRaw: '{}', model: { provider: 'p', model: 'm' } }, 'en', 'now')
-assert.deepEqual(withModel, { name: 'read', argsRaw: '{}', lang: 'en', study: 'now' })
+assert.deepEqual(withModel, { name: 'read', argsRaw: '{}', lang: 'en', study: ['now'] })
 assert.ok(!('model' in withModel), 'the model choice never rides on the request')
 
 // Any response that is not a string detail explains nothing rather than throwing.
@@ -551,26 +551,32 @@ assert.equal(pickDetail(null), '')
 assert.equal(pickDetail('text'), '')
 
 // Three levels, basic until the reader changes it, and storage failure is not fatal.
-assert.equal(built.__test.readDetail(), 'rule')
-assert.deepEqual(built.__test.LEVELS, ['rule', 'model', 'full'], 'three levels, in increasing detail')
+assert.deepEqual(built.__test.readDetail(), ['rule'], 'the basic layer is on by default')
+assert.deepEqual(built.__test.LEVELS, ['rule', 'model', 'full'], 'three layers, in increasing detail')
 const store = new Map()
 globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) }
 built.__test.setDetail('model')
-assert.equal(store.get('dsh-step-explain/detail'), 'model', 'the level is remembered per browser')
-assert.equal(built.__test.readDetail(), 'model')
+assert.equal(store.get('dsh-step-explain/detail'), '["rule","model"]', 'the layers are remembered per browser')
+assert.deepEqual(built.__test.readDetail(), ['rule', 'model'])
 built.__test.setDetail('full')
-assert.equal(store.get('dsh-step-explain/detail'), 'full')
-assert.equal(built.__test.readDetail(), 'full')
-// An unknown or old stored value falls back to the plain rule text.
+assert.equal(store.get('dsh-step-explain/detail'), '["rule","model","full"]')
+assert.deepEqual(built.__test.readDetail(), ['rule', 'model', 'full'])
+// An unknown or old stored value falls back to the basic layer.
 store.set('dsh-step-explain/detail', 'on')
-assert.equal(built.__test.readDetail(), 'rule', 'an old on/off value is not a level')
+assert.deepEqual(built.__test.readDetail(), ['rule'], 'an old on/off value is not a layer list')
 store.set('dsh-step-explain/detail', 'nonsense')
-assert.equal(built.__test.readDetail(), 'rule', 'garbage is not a level')
+assert.deepEqual(built.__test.readDetail(), ['rule'], 'garbage is not a layer list')
 built.__test.setDetail('nonsense')
-assert.equal(built.__test.readDetail(), 'rule', 'an unknown level never sticks')
+assert.deepEqual(built.__test.readDetail(), ['rule'], 'an unknown layer never sticks')
 built.__test.setDetail('rule')
-assert.equal(store.get('dsh-step-explain/detail'), 'rule')
+assert.equal(store.get('dsh-step-explain/detail'), '["rule"]')
+// Independent switches: two layers can be on at once, in canonical order.
+built.__test.setDetail(['full', 'model'])
+assert.deepEqual(built.__test.readDetail(), ['model', 'full'], 'any combination is kept, in order')
+built.__test.setDetail([])
+assert.deepEqual(built.__test.readDetail(), [], 'turning everything off is allowed')
 delete globalThis.localStorage
+built.__test.setDetail(['rule'])
 
 // With the level at basic, the approval cell asks the Host for nothing and still explains.
 const offApproval = textOf(
@@ -603,7 +609,7 @@ assert.ok(fullApproval.includes('读取文件'), 'the full level reuses the real
   const levels = controlsOf(fullNode).filter(
     (node) => node.type === 'button' && ['基础', '模型补充', '完整说明'].includes(textOf(node).trim()),
   )
-  assert.deepEqual(levels.map((node) => node.props['aria-pressed']), [false, false, true], 'the full level reads as current')
+  assert.deepEqual(levels.map((node) => node.props['aria-pressed']), [true, true, true], 'picking the full preset lights all three layers')
 }
 // Only the level button — no allow/reject control ever comes from this cell.
 const fullControls = controlsOf(fullNode).filter((node) => typeof node.type === 'string' && /^(button|input|form|select|textarea)$/.test(node.type))
@@ -672,7 +678,7 @@ built.__test.setDetail('rule')
 
   // An unknown stored value falls back to the default instead of crashing.
   built.__test.setStudy('nonsense')
-  assert.equal(built.__test.readStudy(), 'plan', 'an unreadable study level falls back to the default')
+  assert.deepEqual(built.__test.readStudy(), ['now', 'why', 'plan'], 'an unreadable study value falls back to every part')
   built.__test.setStudy('plan')
 }
 
@@ -774,8 +780,8 @@ assert.deepEqual(
   // The docs entry is a disclosure, so it carries aria-expanded rather than
   // aria-pressed; `undefined` there is correct, not a missing state.
   levelButtons.map((node) => node.props['aria-pressed']),
-  [true, false, false, false, false, true, true, false, true, false, undefined],
-  'each group marks its own current level: Basic for the dialog, the fullest for study, model off, context off',
+  [true, false, false, true, true, true, true, false, true, false, undefined],
+  'each group marks its own layers: basic for the dialog, all three for study, model off, context off',
 )
 // The level control must be reachable: the row that holds it lets the group
 // wrap and grow rather than clipping it out of the scroll column.
@@ -793,8 +799,8 @@ assert.equal(pageSelects[0].props.value, '', 'the page agrees with the row on th
 const pageStore = new Map()
 globalThis.localStorage = { getItem: (key) => pageStore.get(key) ?? null, setItem: (key, value) => pageStore.set(key, value) }
 built.__test.setDetail('model')
-assert.equal(built.__test.readDetail(), 'model', 'a level picked on the page sticks')
-assert.equal(pageStore.get('dsh-step-explain/detail'), 'model', 'and it lands in the same storage key')
+assert.deepEqual(built.__test.readDetail(), ['rule', 'model'], 'a layer picked on the page sticks')
+assert.equal(pageStore.get('dsh-step-explain/detail'), '["rule","model"]', 'and it lands in the same storage key')
 built.__test.setDetail('rule')
 delete globalThis.localStorage
 // The page explains its own privacy boundary rather than leaving it implied.
@@ -889,45 +895,55 @@ assert.ok(
   }
   const pressed = (tree) => controlsOf(tree).filter((node) => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf)
 
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'the page opens on each group’s own default')
+  assert.deepEqual(
+    pressed(draw()),
+    ['基础', '做什么', '为什么', '下一步', '关闭', '不读'],
+    'the page opens on each group’s own default; study starts with every part on',
+  )
   press(draw(), '完整说明')
-  assert.equal(liveStore.get('dsh-step-explain/detail'), 'full', 'the click is stored')
-  assert.deepEqual(pressed(draw()), ['完整说明', '下一步', '关闭', '不读'], 'and the re-rendered page shows it as current')
+  assert.equal(liveStore.get('dsh-step-explain/detail'), '["rule","full"]', 'the click is stored as a layer list')
+  assert.deepEqual(
+    pressed(draw()),
+    ['基础', '完整说明', '做什么', '为什么', '下一步', '关闭', '不读'],
+    'switching one layer on does not switch the others off',
+  )
   press(draw(), '模型补充')
-  assert.equal(liveStore.get('dsh-step-explain/detail'), 'model', 'another level is picked the same way')
-  assert.deepEqual(pressed(draw()), ['模型补充', '下一步', '关闭', '不读'], 'the page follows the new pick')
-  // Back to basic, so the rest of the file starts where it expects to.
-  press(draw(), '基础')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'and it can go back')
+  assert.equal(liveStore.get('dsh-step-explain/detail'), '["rule","model","full"]', 'all three layers can be on at once')
+  press(draw(), '完整说明')
+  press(draw(), '模型补充')
+  assert.equal(liveStore.get('dsh-step-explain/detail'), '["rule"]', 'each layer can be switched off again')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '为什么', '下一步', '关闭', '不读'], 'back to the basic layer only')
 
-  // The study level is its own setting: it moves without touching the detail one.
+  // The study group is its own set of switches: it moves without touching detail.
   press(draw(), '为什么')
-  assert.equal(liveStore.get('dsh-step-explain/study'), 'why', 'the study pick is stored separately')
-  assert.equal(liveStore.get('dsh-step-explain/detail'), 'rule', 'and does not disturb the detail level')
-  assert.deepEqual(pressed(draw()), ['基础', '为什么', '关闭', '不读'], 'each group keeps its own current level')
-  press(draw(), '做什么')
-  assert.deepEqual(pressed(draw()), ['基础', '做什么', '关闭', '不读'], 'the study group follows its own pick')
-  press(draw(), '下一步')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'and it returns to the default level')
+  assert.equal(liveStore.get('dsh-step-explain/study'), '["now","plan"]', 'the study switch is stored separately')
+  assert.equal(liveStore.get('dsh-step-explain/detail'), '["rule"]', 'and does not disturb the detail layers')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '下一步', '关闭', '不读'], 'only the switched-off part disappears')
+  press(draw(), '为什么')
+  assert.deepEqual(
+    pressed(draw()),
+    ['基础', '做什么', '为什么', '下一步', '关闭', '不读'],
+    'switching it back on restores the default set',
+  )
 
   // The model switch is a third, independent setting.
   press(draw(), '开启')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'on', 'turning the model on is stored')
-  assert.equal(liveStore.get('dsh-step-explain/study'), 'plan', 'and leaves the study level alone')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '开启', '不读'], 'the switch shows as on')
+  assert.equal(liveStore.get('dsh-step-explain/study'), '["now","why","plan"]', 'and leaves the study parts alone')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '为什么', '下一步', '开启', '不读'], 'the switch shows as on')
   press(draw(), '关闭')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and it can be turned off again')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'back to the cheap default')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '为什么', '下一步', '关闭', '不读'], 'back to the cheap default')
 
   // The context setting is the fourth, and it stores under its own key. It is a
   // two-mode choice: none, or the whole conversation with the reader picking.
   press(draw(), '挑选聊天内容')
   assert.equal(liveStore.get('dsh-step-explain/context'), 'full', 'the context mode is stored separately')
   assert.equal(liveStore.get('dsh-step-explain/explain'), 'off', 'and leaves the model switch alone')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '挑选聊天内容'], 'only the context mode moved')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '为什么', '下一步', '关闭', '挑选聊天内容'], 'only the context mode moved')
   press(draw(), '不读')
   assert.equal(liveStore.get('dsh-step-explain/context'), 'off', 'and it can be turned off again')
-  assert.deepEqual(pressed(draw()), ['基础', '下一步', '关闭', '不读'], 'back to sending only the composer')
+  assert.deepEqual(pressed(draw()), ['基础', '做什么', '为什么', '下一步', '关闭', '不读'], 'back to sending only the composer')
 
   // The notes are a disclosure: closed until asked for, then it explains the
   // parts that are not guessable from the labels (three modes, ticks, the cap).
